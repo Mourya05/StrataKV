@@ -5,6 +5,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace stratakv {
@@ -32,9 +33,21 @@ PagedAttention::PagedAttention(std::size_t hidden_dim,
         throw std::invalid_argument(
             "PagedAttention: hidden_dim must be divisible by num_heads");
     }
+    if (head_dim_ % 2 != 0) {
+        throw std::invalid_argument(
+            "PagedAttention: head dimension must be even for RoPE");
+    }
     if (total_blocks <= 0 || block_size <= 0) {
         throw std::invalid_argument(
             "PagedAttention: total_blocks and block_size must be positive");
+    }
+
+    rope_inv_freq_.resize(head_dim_ / 2u);
+    for (std::size_t pair = 0; pair < rope_inv_freq_.size(); ++pair) {
+        const double exponent = -2.0 * static_cast<double>(pair) /
+            static_cast<double>(head_dim_);
+        rope_inv_freq_[pair] = static_cast<float>(
+            std::pow(10000.0, exponent));
     }
 }
 
@@ -45,13 +58,50 @@ void PagedAttention::ensure_cache(const memory::BlockPool& block_pool) {
             "PagedAttention: BlockPool configuration does not match cache");
     }
 
-    if (!key_cache_) {
+    if (!key_cache_ && !value_cache_) {
         const std::vector<std::size_t> shape = {
             static_cast<std::size_t>(total_blocks_),
             static_cast<std::size_t>(block_size_),
             hidden_dim_};
-        key_cache_.emplace(shape);
-        value_cache_.emplace(shape);
+        // Construct both tensors before publishing either one. This keeps a
+        // failed allocation from leaving a half-initialized attention cache.
+        Tensor key_cache(shape);
+        Tensor value_cache(shape);
+        key_cache_ = std::move(key_cache);
+        value_cache_ = std::move(value_cache);
+    } else if (!key_cache_ || !value_cache_) {
+        throw std::runtime_error(
+            "PagedAttention: cache is only partially initialized");
+    }
+}
+
+void PagedAttention::apply_rope(Tensor& queries,
+                                Tensor& keys,
+                                std::size_t token,
+                                std::size_t absolute_position) const {
+    float* query_row = queries.data() + token * hidden_dim_;
+    float* key_row = keys.data() + token * hidden_dim_;
+
+    for (std::size_t head = 0; head < num_heads_; ++head) {
+        const std::size_t head_offset = head * head_dim_;
+        for (std::size_t pair = 0; pair < rope_inv_freq_.size(); ++pair) {
+            const std::size_t first = head_offset + 2u * pair;
+            const std::size_t second = first + 1u;
+            const double angle = static_cast<double>(absolute_position) *
+                static_cast<double>(rope_inv_freq_[pair]);
+            const float cosine = static_cast<float>(std::cos(angle));
+            const float sine = static_cast<float>(std::sin(angle));
+
+            const float query_first = query_row[first];
+            const float query_second = query_row[second];
+            query_row[first] = query_first * cosine - query_second * sine;
+            query_row[second] = query_first * sine + query_second * cosine;
+
+            const float key_first = key_row[first];
+            const float key_second = key_row[second];
+            key_row[first] = key_first * cosine - key_second * sine;
+            key_row[second] = key_first * sine + key_second * cosine;
+        }
     }
 }
 
@@ -74,7 +124,8 @@ std::size_t PagedAttention::cache_offset(int physical_block,
 Tensor PagedAttention::forward(const Tensor& hidden_states,
                                int seq_id,
                                memory::PageTable& page_table,
-                               memory::BlockPool& block_pool) {
+                               memory::BlockPool& block_pool,
+                               bool append_tokens) {
     if (hidden_states.ndim() != 2 ||
         hidden_states.shape()[1] != hidden_dim_) {
         throw std::invalid_argument(
@@ -103,25 +154,41 @@ Tensor PagedAttention::forward(const Tensor& hidden_states,
             "PagedAttention::forward: sequence length exceeds int range");
     }
 
-    // Preflight before mutating the page table. This prevents an avoidable
-    // partial append when the pool cannot hold the requested chunk.
-    const std::size_t total_tokens = initial_length + new_tokens;
-    const std::size_t required_blocks =
-        (total_tokens + static_cast<std::size_t>(block_size_) - 1u) /
-        static_cast<std::size_t>(block_size_);
-    const std::size_t allocated_blocks = initial_state.physical_blocks.size();
-    const std::size_t blocks_needed =
-        required_blocks > allocated_blocks
-            ? required_blocks - allocated_blocks
-            : 0u;
-    if (blocks_needed > block_pool.free_count()) {
-        throw std::runtime_error(
-            "PagedAttention::forward: insufficient KV blocks (OOM)");
+    // The first layer appends new tokens and advances the shared logical
+    // sequence. Later layers use the same mapping, but must write their own
+    // private KV tensors at those positions without appending again.
+    std::size_t first_position = initial_length;
+    if (append_tokens) {
+        // Preflight before mutating the page table. This prevents an avoidable
+        // partial append when the pool cannot hold the requested chunk.
+        const std::size_t total_tokens = initial_length + new_tokens;
+        const std::size_t required_blocks =
+            (total_tokens + static_cast<std::size_t>(block_size_) - 1u) /
+            static_cast<std::size_t>(block_size_);
+        const std::size_t allocated_blocks = initial_state.physical_blocks.size();
+        const std::size_t blocks_needed =
+            required_blocks > allocated_blocks
+                ? required_blocks - allocated_blocks
+                : 0u;
+        if (blocks_needed > block_pool.free_count()) {
+            throw std::runtime_error(
+                "PagedAttention::forward: insufficient KV blocks (OOM)");
+        }
+    } else {
+        if (new_tokens > initial_length) {
+            throw std::invalid_argument(
+                "PagedAttention::forward: non-appending layer cannot address "
+                "tokens beyond the current sequence");
+        }
+        first_position = initial_length - new_tokens;
     }
 
     Tensor queries = q_proj_.forward(hidden_states);
     Tensor keys    = k_proj_.forward(hidden_states);
     Tensor values  = v_proj_.forward(hidden_states);
+    for (std::size_t token = 0; token < new_tokens; ++token) {
+        apply_rope(queries, keys, token, first_position + token);
+    }
     Tensor context({new_tokens, hidden_dim_});
 
     std::vector<unsigned char> visited(
@@ -131,11 +198,13 @@ Tensor PagedAttention::forward(const Tensor& hidden_states,
     float* value_cache_data = value_cache_->data();
 
     for (std::size_t token = 0; token < new_tokens; ++token) {
-        const std::size_t logical_position = initial_length + token;
+        const std::size_t logical_position = first_position + token;
 
-        // append_token may grow physical_blocks. Do not retain a state
-        // reference across this call; obtain a fresh view after appending.
-        page_table.append_token(seq_id, block_pool);
+        if (append_tokens) {
+            // append_token may grow physical_blocks. Do not retain a state
+            // reference across this call; obtain a fresh view after appending.
+            page_table.append_token(seq_id, block_pool);
+        }
         const memory::SequenceState& state = page_table.get_state(seq_id);
         const std::size_t page_index =
             logical_position / static_cast<std::size_t>(block_size_);

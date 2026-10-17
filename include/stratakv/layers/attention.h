@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <optional>
+#include <vector>
 
 namespace stratakv {
 namespace layers {
@@ -28,7 +29,8 @@ public:
     Tensor forward(const Tensor& hidden_states,
                    int seq_id,
                    memory::PageTable& page_table,
-                   memory::BlockPool& block_pool);
+                   memory::BlockPool& block_pool,
+                   bool append_tokens = true);
 
     // Number of distinct physical blocks read by the last forward pass.
     std::size_t last_blocks_visited() const noexcept {
@@ -46,6 +48,10 @@ public:
 
 private:
     void ensure_cache(const memory::BlockPool& block_pool);
+    void apply_rope(Tensor& queries,
+                    Tensor& keys,
+                    std::size_t token,
+                    std::size_t absolute_position) const;
     std::size_t cache_offset(int physical_block,
                              std::size_t slot) const;
 
@@ -59,6 +65,7 @@ private:
     std::size_t head_dim_;
     int total_blocks_;
     int block_size_;
+    std::vector<float> rope_inv_freq_;
 
     // [total_blocks, block_size, hidden_dim]. A physical block ID is the
     // first index; the page table supplies that ID for each logical position.

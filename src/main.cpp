@@ -164,6 +164,7 @@ void run_tokens(const std::filesystem::path& checkpoint) {
     cfg.hidden_dim = 8;
     cfg.intermediate_dim = 16;
     cfg.num_heads = 2;
+    cfg.num_layers = 1;
     cfg.total_blocks = 32;
     cfg.block_size = 16;
     cfg.vocab_size = 32;

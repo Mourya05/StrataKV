@@ -27,6 +27,7 @@ std::size_t checked_elements(std::initializer_list<std::size_t> dims) {
 
 GeneratorConfig validate_config(GeneratorConfig c) {
     if (c.hidden_dim == 0 || c.intermediate_dim == 0 || c.num_heads == 0 ||
+        c.num_layers == 0 ||
         c.vocab_size == 0 || c.vocab_size > static_cast<std::size_t>(INT_MAX) ||
         c.total_blocks <= 0 || c.block_size <= 0 ||
         c.hidden_dim % c.num_heads != 0 || c.eos_token_id < -1 ||
@@ -36,29 +37,51 @@ GeneratorConfig validate_config(GeneratorConfig c) {
     checked_elements({c.hidden_dim, c.hidden_dim});
     checked_elements({c.hidden_dim, c.intermediate_dim});
     checked_elements({c.vocab_size, c.hidden_dim});
+    checked_elements({c.num_layers, c.hidden_dim, c.hidden_dim});
+    checked_elements({c.num_layers, c.hidden_dim, c.intermediate_dim});
+    checked_elements({c.num_layers,
+                      static_cast<std::size_t>(c.total_blocks),
+                      static_cast<std::size_t>(c.block_size),
+                      c.hidden_dim});
     checked_elements({static_cast<std::size_t>(c.total_blocks),
                       static_cast<std::size_t>(c.block_size), c.hidden_dim});
     return c;
 }
 
-Tensor take(io::WeightMap& weights, const char* key,
+std::vector<models::TransformerBlock> make_blocks(const GeneratorConfig& config) {
+    std::vector<models::TransformerBlock> blocks;
+    blocks.reserve(config.num_layers);
+    for (std::size_t layer = 0; layer < config.num_layers; ++layer) {
+        blocks.emplace_back(config.hidden_dim, config.intermediate_dim,
+                            config.num_heads, config.total_blocks,
+                            config.block_size);
+    }
+    return blocks;
+}
+
+bool has_weight(const io::WeightMap& weights, const std::string& key) {
+    return weights.find(key) != weights.end();
+}
+
+Tensor take(io::WeightMap& weights, const std::string& key,
             std::initializer_list<std::size_t> expected) {
     auto it = weights.find(key); // Never operator[]: Tensor has no default ctor.
     if (it == weights.end())
-        throw std::invalid_argument(std::string("Missing weight: ") + key);
+        throw std::invalid_argument("Missing weight: " + key);
     const Tensor& source = it->second;
     if (source.shape() != std::vector<std::size_t>(expected) ||
         source.num_elements() != checked_elements(expected) || !source.data())
-        throw std::invalid_argument(std::string("Wrong shape/storage: ") + key);
+        throw std::invalid_argument("Wrong shape/storage: " + key);
     for (std::size_t i = 0; i < source.num_elements(); ++i)
         if (!std::isfinite(source[i]))
-            throw std::invalid_argument(std::string("Non-finite weight: ") + key);
+            throw std::invalid_argument("Non-finite weight: " + key);
     Tensor result = std::move(it->second);
     weights.erase(it);
     return result;
 }
 
-void load_linear(io::WeightMap& weights, const char* key, layers::Linear& layer) {
+void load_linear(io::WeightMap& weights, const std::string& key,
+                 layers::Linear& layer) {
     const auto in = layer.input_dim(), out = layer.output_dim();
     Tensor disk = take(weights, key, {out, in});
     Tensor& dest = layer.weight(); // Transpose into existing allocation once.
@@ -67,6 +90,20 @@ void load_linear(io::WeightMap& weights, const char* key, layers::Linear& layer)
             dest[i * out + o] = disk[o * in + i];
     if (Tensor* bias = layer.bias())
         std::fill_n(bias->data(), bias->num_elements(), 0.0f);
+}
+
+Tensor take_embedding(io::WeightMap& weights, const GeneratorConfig& config) {
+    const char* key = has_weight(weights, "model.embed_tokens.weight")
+        ? "model.embed_tokens.weight"
+        : "tok_embeddings.weight";
+    return take(weights, key, {config.vocab_size, config.hidden_dim});
+}
+
+Tensor take_final_norm(io::WeightMap& weights, const GeneratorConfig& config) {
+    const char* key = has_weight(weights, "model.norm.weight")
+        ? "model.norm.weight"
+        : "norm.weight";
+    return take(weights, key, {config.hidden_dim});
 }
 
 // Existing PageTable can pop a pool block before vector/map growth throws.
@@ -97,24 +134,73 @@ static_assert(std::is_nothrow_move_assignable_v<memory::PageTable> &&
 
 Generator::Generator(GeneratorConfig config, io::WeightMap weights)
     : config_(validate_config(config)),
-      block_(config_.hidden_dim, config_.intermediate_dim, config_.num_heads,
-             config_.total_blocks, config_.block_size),
+      blocks_(make_blocks(config_)),
       pool_(config_.total_blocks, config_.block_size),
-      embeddings_(take(weights, "tok_embeddings.weight",
-                       {config_.vocab_size, config_.hidden_dim})),
-      final_norm_(take(weights, "norm.weight", {config_.hidden_dim})),
+      embeddings_(take_embedding(weights, config_)),
+      final_norm_(take_final_norm(weights, config_)),
       lm_head_(config_.hidden_dim, config_.vocab_size) {
     const auto h = config_.hidden_dim;
-    block_.input_norm() = layers::RMSNorm(take(weights, "block.input_norm.weight", {h}));
-    block_.post_attention_norm() = layers::RMSNorm(
-        take(weights, "block.post_attention_norm.weight", {h}));
-    auto& attn = block_.attention();
-    load_linear(weights, "block.attn.q_proj.weight", attn.query_projection());
-    load_linear(weights, "block.attn.k_proj.weight", attn.key_projection());
-    load_linear(weights, "block.attn.v_proj.weight", attn.value_projection());
-    load_linear(weights, "block.attn.o_proj.weight", attn.output_projection());
-    load_linear(weights, "block.ffn.up_proj.weight", block_.ffn_up());
-    load_linear(weights, "block.ffn.down_proj.weight", block_.ffn_down());
+    const bool llama_schema = has_weight(
+        weights, "model.layers.0.input_layernorm.weight");
+
+    if (llama_schema) {
+        for (std::size_t layer_index = 0;
+             layer_index < config_.num_layers; ++layer_index) {
+            const std::string prefix = "model.layers." +
+                std::to_string(layer_index) + ".";
+            auto& block = blocks_.at(layer_index);
+            block.input_norm() = layers::RMSNorm(
+                take(weights, prefix + "input_layernorm.weight", {h}));
+            block.post_attention_norm() = layers::RMSNorm(
+                take(weights, prefix + "post_attention_layernorm.weight", {h}));
+
+            auto& attn = block.attention();
+            load_linear(weights, prefix + "self_attn.q_proj.weight",
+                        attn.query_projection());
+            load_linear(weights, prefix + "self_attn.k_proj.weight",
+                        attn.key_projection());
+            load_linear(weights, prefix + "self_attn.v_proj.weight",
+                        attn.value_projection());
+            load_linear(weights, prefix + "self_attn.o_proj.weight",
+                        attn.output_projection());
+
+            load_linear(weights, prefix + "mlp.gate_proj.weight",
+                        block.gate_projection());
+            load_linear(weights, prefix + "mlp.up_proj.weight",
+                        block.up_projection());
+            load_linear(weights, prefix + "mlp.down_proj.weight",
+                        block.down_projection());
+        }
+    } else {
+        // Accept the Phase 5 one-layer schema as a compatibility path. New
+        // Llama checkpoints always take the branch above; this path also
+        // makes the schema migration non-breaking for existing local models.
+        if (config_.num_layers != 1) {
+            throw std::invalid_argument(
+                "Generator: Llama layer weights are missing");
+        }
+        auto& block = blocks_.front();
+        block.input_norm() = layers::RMSNorm(
+            take(weights, "block.input_norm.weight", {h}));
+        block.post_attention_norm() = layers::RMSNorm(
+            take(weights, "block.post_attention_norm.weight", {h}));
+        auto& attn = block.attention();
+        load_linear(weights, "block.attn.q_proj.weight",
+                    attn.query_projection());
+        load_linear(weights, "block.attn.k_proj.weight",
+                    attn.key_projection());
+        load_linear(weights, "block.attn.v_proj.weight",
+                    attn.value_projection());
+        load_linear(weights, "block.attn.o_proj.weight",
+                    attn.output_projection());
+        load_linear(weights, "block.ffn.up_proj.weight",
+                    block.gate_projection());
+        std::copy_n(block.gate_projection().weight().data(),
+                    block.gate_projection().weight().num_elements(),
+                    block.up_projection().weight().data());
+        load_linear(weights, "block.ffn.down_proj.weight",
+                    block.down_projection());
+    }
     load_linear(weights, "lm_head.weight", lm_head_);
     if (!weights.empty())
         throw std::invalid_argument("Unexpected weight: " + weights.begin()->first);
@@ -131,21 +217,10 @@ Tensor Generator::embed(const int* ids, std::size_t count) const {
 }
 
 Tensor Generator::forward(const Tensor& input) {
-    if (retry_attention_) {
-        // A failed initial cache allocation can leave only one KV tensor alive.
-        // Build first (may throw), then transfer learned projections noexcept.
-        layers::PagedAttention clean(config_.hidden_dim, config_.num_heads,
-                                     config_.total_blocks, config_.block_size);
-        auto& old = block_.attention();
-        clean.query_projection() = std::move(old.query_projection());
-        clean.key_projection() = std::move(old.key_projection());
-        clean.value_projection() = std::move(old.value_projection());
-        clean.output_projection() = std::move(old.output_projection());
-        old = std::move(clean);
+    Tensor output = blocks_.front().forward(input, 0, pages_, pool_, true);
+    for (std::size_t layer = 1; layer < blocks_.size(); ++layer) {
+        output = blocks_[layer].forward(output, 0, pages_, pool_, false);
     }
-    retry_attention_ = true;
-    Tensor output = block_.forward(input, 0, pages_, pool_);
-    retry_attention_ = false;
     return output;
 }
 
