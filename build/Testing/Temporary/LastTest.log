@@ -1,0 +1,19 @@
+Start testing: Oct 17 21:35 India Standard Time
+----------------------------------------------------------
+1/1 Testing: phase5_smoke
+1/1 Test: phase5_smoke
+Command: "E:/My Folder/Mourya folder/Projects/StrataKV/build/Release/phase5_smoke.exe" "E:/My Folder/Mourya folder/Projects/StrataKV/build"
+Directory: E:/My Folder/Mourya folder/Projects/StrataKV/build
+"phase5_smoke" start time: Oct 17 21:35 India Standard Time
+Output:
+----------------------------------------------------------
+Phase 5: 58 checks passed
+<end of output>
+Test time =   1.56 sec
+----------------------------------------------------------
+Test Passed.
+"phase5_smoke" end time: Oct 17 21:35 India Standard Time
+"phase5_smoke" time elapsed: 00:00:01
+----------------------------------------------------------
+
+End testing: Oct 17 21:35 India Standard Time

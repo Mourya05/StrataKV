@@ -2,3 +2,10 @@ E:\My Folder\Mourya folder\Projects\StrataKV\src\cpu\tensor.cpp;E:\My Folder\Mou
 E:\My Folder\Mourya folder\Projects\StrataKV\src\cpu\gemm_cpu.cpp;E:\My Folder\Mourya folder\Projects\StrataKV\build\stratakv.dir\Release\gemm_cpu.obj
 E:\My Folder\Mourya folder\Projects\StrataKV\src\memory\block_pool.cpp;E:\My Folder\Mourya folder\Projects\StrataKV\build\stratakv.dir\Release\block_pool.obj
 E:\My Folder\Mourya folder\Projects\StrataKV\src\memory\page_table.cpp;E:\My Folder\Mourya folder\Projects\StrataKV\build\stratakv.dir\Release\page_table.obj
+E:\My Folder\Mourya folder\Projects\StrataKV\src\layers\linear.cpp;E:\My Folder\Mourya folder\Projects\StrataKV\build\stratakv.dir\Release\linear.obj
+E:\My Folder\Mourya folder\Projects\StrataKV\src\layers\rmsnorm.cpp;E:\My Folder\Mourya folder\Projects\StrataKV\build\stratakv.dir\Release\rmsnorm.obj
+E:\My Folder\Mourya folder\Projects\StrataKV\src\layers\attention.cpp;E:\My Folder\Mourya folder\Projects\StrataKV\build\stratakv.dir\Release\attention.obj
+E:\My Folder\Mourya folder\Projects\StrataKV\src\models\transformer_block.cpp;E:\My Folder\Mourya folder\Projects\StrataKV\build\stratakv.dir\Release\transformer_block.obj
+E:\My Folder\Mourya folder\Projects\StrataKV\src\io\safetensors.cpp;E:\My Folder\Mourya folder\Projects\StrataKV\build\stratakv.dir\Release\safetensors.obj
+E:\My Folder\Mourya folder\Projects\StrataKV\src\generation\sampler.cpp;E:\My Folder\Mourya folder\Projects\StrataKV\build\stratakv.dir\Release\sampler.obj
+E:\My Folder\Mourya folder\Projects\StrataKV\src\generation\generator.cpp;E:\My Folder\Mourya folder\Projects\StrataKV\build\stratakv.dir\Release\generator.obj

@@ -6,6 +6,7 @@
 
 #include <stdexcept>
 #include <string>
+#include <limits>
 
 namespace stratakv {
 namespace memory  {
@@ -47,11 +48,23 @@ void PageTable::allocate_sequence(int seq_id, BlockPool& pool) {
 void PageTable::append_token(int seq_id, BlockPool& pool) {
     SequenceState& state = checked_lookup(table_, seq_id, "append_token");
 
-    state.sequence_length += 1;
+    if (state.sequence_length == std::numeric_limits<int>::max()) {
+        throw std::overflow_error(
+            "append_token: sequence length exceeds int range");
+    }
 
-    // If we've just filled a full block, allocate the next one.
-    if (state.sequence_length % pool.block_size() == 0)
+    const std::size_t allocated_capacity =
+        state.physical_blocks.size() *
+        static_cast<std::size_t>(pool.block_size());
+
+    // Allocate before writing a token only when all assigned pages are full.
+    // Thus N tokens require ceil(N / block_size) pages.
+    if (static_cast<std::size_t>(state.sequence_length) >=
+        allocated_capacity) {
         state.physical_blocks.push_back(pool.allocate_block());
+    }
+
+    ++state.sequence_length;
 }
 
 // ---------------------------------------------------------------------------

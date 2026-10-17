@@ -13,6 +13,27 @@
     <ClCompile Include="E:\My Folder\Mourya folder\Projects\StrataKV\src\memory\page_table.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="E:\My Folder\Mourya folder\Projects\StrataKV\src\layers\linear.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="E:\My Folder\Mourya folder\Projects\StrataKV\src\layers\rmsnorm.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="E:\My Folder\Mourya folder\Projects\StrataKV\src\layers\attention.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="E:\My Folder\Mourya folder\Projects\StrataKV\src\models\transformer_block.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="E:\My Folder\Mourya folder\Projects\StrataKV\src\io\safetensors.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="E:\My Folder\Mourya folder\Projects\StrataKV\src\generation\sampler.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="E:\My Folder\Mourya folder\Projects\StrataKV\src\generation\generator.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <CudaCompile Include="..\src\cuda\gemm_cuda.cu">

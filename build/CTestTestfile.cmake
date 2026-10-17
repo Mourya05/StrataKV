@@ -1,0 +1,21 @@
+# CMake generated Testfile for 
+# Source directory: E:/My Folder/Mourya folder/Projects/StrataKV
+# Build directory: E:/My Folder/Mourya folder/Projects/StrataKV/build
+# 
+# This file includes the relevant testing commands required for 
+# testing this directory and lists subdirectories to be tested as well.
+if(CTEST_CONFIGURATION_TYPE MATCHES "^([Dd][Ee][Bb][Uu][Gg])$")
+  add_test(phase5_smoke "E:/My Folder/Mourya folder/Projects/StrataKV/build/Debug/phase5_smoke.exe" "E:/My Folder/Mourya folder/Projects/StrataKV/build")
+  set_tests_properties(phase5_smoke PROPERTIES  _BACKTRACE_TRIPLES "E:/My Folder/Mourya folder/Projects/StrataKV/CMakeLists.txt;132;add_test;E:/My Folder/Mourya folder/Projects/StrataKV/CMakeLists.txt;0;")
+elseif(CTEST_CONFIGURATION_TYPE MATCHES "^([Rr][Ee][Ll][Ee][Aa][Ss][Ee])$")
+  add_test(phase5_smoke "E:/My Folder/Mourya folder/Projects/StrataKV/build/Release/phase5_smoke.exe" "E:/My Folder/Mourya folder/Projects/StrataKV/build")
+  set_tests_properties(phase5_smoke PROPERTIES  _BACKTRACE_TRIPLES "E:/My Folder/Mourya folder/Projects/StrataKV/CMakeLists.txt;132;add_test;E:/My Folder/Mourya folder/Projects/StrataKV/CMakeLists.txt;0;")
+elseif(CTEST_CONFIGURATION_TYPE MATCHES "^([Mm][Ii][Nn][Ss][Ii][Zz][Ee][Rr][Ee][Ll])$")
+  add_test(phase5_smoke "E:/My Folder/Mourya folder/Projects/StrataKV/build/MinSizeRel/phase5_smoke.exe" "E:/My Folder/Mourya folder/Projects/StrataKV/build")
+  set_tests_properties(phase5_smoke PROPERTIES  _BACKTRACE_TRIPLES "E:/My Folder/Mourya folder/Projects/StrataKV/CMakeLists.txt;132;add_test;E:/My Folder/Mourya folder/Projects/StrataKV/CMakeLists.txt;0;")
+elseif(CTEST_CONFIGURATION_TYPE MATCHES "^([Rr][Ee][Ll][Ww][Ii][Tt][Hh][Dd][Ee][Bb][Ii][Nn][Ff][Oo])$")
+  add_test(phase5_smoke "E:/My Folder/Mourya folder/Projects/StrataKV/build/RelWithDebInfo/phase5_smoke.exe" "E:/My Folder/Mourya folder/Projects/StrataKV/build")
+  set_tests_properties(phase5_smoke PROPERTIES  _BACKTRACE_TRIPLES "E:/My Folder/Mourya folder/Projects/StrataKV/CMakeLists.txt;132;add_test;E:/My Folder/Mourya folder/Projects/StrataKV/CMakeLists.txt;0;")
+else()
+  add_test(phase5_smoke NOT_AVAILABLE)
+endif()

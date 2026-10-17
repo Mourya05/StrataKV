@@ -61,9 +61,15 @@ endif()
 set(STRATAKV_SOURCES
     src/cpu/tensor.cpp
     src/cpu/gemm_cpu.cpp
-    # Phase 3: Paged KV Cache memory subsystem
     src/memory/block_pool.cpp
     src/memory/page_table.cpp
+    src/layers/linear.cpp
+    src/layers/rmsnorm.cpp
+    src/layers/attention.cpp
+    src/models/transformer_block.cpp
+    src/io/safetensors.cpp
+    src/generation/sampler.cpp
+    src/generation/generator.cpp
 )
 
 # Optionally append CUDA sources for Phase 2+
@@ -119,3 +125,10 @@ target_link_libraries(stratakv_run PRIVATE stratakv)
 add_executable(benchmark_gemm benchmarks/benchmark_gemm.cpp)
 target_link_libraries(benchmark_gemm PRIVATE stratakv)
 
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(phase5_smoke tests/phase5_smoke.cpp)
+    target_link_libraries(phase5_smoke PRIVATE stratakv)
+    add_test(NAME phase5_smoke
+             COMMAND phase5_smoke "${CMAKE_CURRENT_BINARY_DIR}")
+endif()

@@ -1,5 +1,11 @@
 E:/My Folder/Mourya folder/Projects/StrataKV/build/CMakeFiles/stratakv.dir
 E:/My Folder/Mourya folder/Projects/StrataKV/build/CMakeFiles/stratakv_run.dir
 E:/My Folder/Mourya folder/Projects/StrataKV/build/CMakeFiles/benchmark_gemm.dir
+E:/My Folder/Mourya folder/Projects/StrataKV/build/CMakeFiles/Experimental.dir
+E:/My Folder/Mourya folder/Projects/StrataKV/build/CMakeFiles/Nightly.dir
+E:/My Folder/Mourya folder/Projects/StrataKV/build/CMakeFiles/Continuous.dir
+E:/My Folder/Mourya folder/Projects/StrataKV/build/CMakeFiles/NightlyMemoryCheck.dir
+E:/My Folder/Mourya folder/Projects/StrataKV/build/CMakeFiles/phase5_smoke.dir
+E:/My Folder/Mourya folder/Projects/StrataKV/build/CMakeFiles/RUN_TESTS.dir
 E:/My Folder/Mourya folder/Projects/StrataKV/build/CMakeFiles/ALL_BUILD.dir
 E:/My Folder/Mourya folder/Projects/StrataKV/build/CMakeFiles/ZERO_CHECK.dir

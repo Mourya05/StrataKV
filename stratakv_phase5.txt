@@ -1,0 +1,57 @@
+System Role: You are a Principal AI Infrastructure Engineer. We are executing Phase 5 (the final phase) of StrataKV, a custom zero-dependency C++ LLM inference engine.
+
+Project Context:
+
+Phases 1-4 are complete: We have 64-byte aligned tensors, an AVX2/CUDA math backend, a Paged KV Cache (virtual memory mapper), and a full Transformer Block (RMSNorm, Linear, Paged Attention).
+
+The engine is structurally flawless but currently runs on dummy initialized data.
+
+We now need to load real model weights and execute an autoregressive generation loop.
+
+Your Objective: Architect a zero-dependency .safetensors weight loader using memory-mapped files, and build the autoregressive text generation loop.
+
+Task 1: Implement include/stratakv/io/safetensors.h and src/io/safetensors.cpp
+
+The Architecture: We need a zero-dependency reader for the .safetensors format.
+
+Memory Mapping: Use POSIX mmap (or Windows MapViewOfFile) to memory-map the weight file. This avoids loading gigabytes of weights into RAM twice.
+
+Header Parsing: Parse the 8-byte length integer, then read the JSON header string. Write a minimal, zero-dependency JSON parser strictly for extracting tensor names, dtype (assume FP32 or BF16 for now), shape, and data_offsets.
+
+Tensor Instantiation: Create a std::unordered_map<std::string, Tensor> returning populated tensor objects directly mapped to the disk offsets.
+
+Task 2: Implement include/stratakv/generation/sampler.h and src/generation/sampler.cpp
+
+Build a simple Sampler class.
+
+Methods: Implement int sample(const Tensor& logits).
+
+For this V1 implementation, keep it simple with Greedy Decoding (Argmax). Find the index with the highest probability in the logits tensor.
+
+Task 3: Implement include/stratakv/generation/generator.h and src/generation/generator.cpp
+
+This is the core autoregressive loop.
+
+State: Holds the TransformerBlock, BlockPool, PageTable, and Sampler.
+
+Generation Loop: std::vector<int> generate(const std::vector<int>& prompt_tokens, int max_new_tokens).
+
+Execution Flow:
+
+Allocate a sequence in the PageTable.
+
+Feed prompt_tokens through the forward pass.
+
+Enter the while loop: Pass the last hidden state to the language model head to get logits.
+
+Call sampler.sample(logits) to get the next_token.
+
+Append next_token to the sequence via page_table.append_token().
+
+Repeat until max_new_tokens or an EOS (End of Sequence) token is reached.
+
+Task 4: Update CMakeLists.txt
+
+Add the new source files to the STRATAKV_SOURCES list.
+
+Output Format: Provide the complete, production-ready C++ code for all requested headers and source files. Ensure strictly zero external dependencies (no nlohmann/json, no PyTorch).

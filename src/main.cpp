@@ -1,4 +1,4 @@
-// =============================================================================
+﻿// =============================================================================
 //  main.cpp  --  StrataKV Phase 2 + Phase 3
 //
 //  Phase 2: 1024x1024 SGEMM benchmark -- AVX2 CPU vs 32x32 tiled CUDA GPU.
@@ -11,7 +11,10 @@
 #include "stratakv/ops.h"
 #include "stratakv/memory/block_pool.h"
 #include "stratakv/memory/page_table.h"
+#include "stratakv/models/transformer_block.h"
+#include "stratakv/generation/generator.h"
 
+#include <filesystem>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -19,6 +22,8 @@
 #include <iostream>
 #include <random>
 #include <string>
+#include <exception>
+
 
 using namespace stratakv;
 using namespace stratakv::memory;
@@ -65,10 +70,118 @@ static void print_seq_mapping(int seq_id, const PageTable& pt) {
     std::cout << "]\n";
 }
 
+static bool run_phase4_smoke_test() {
+    using stratakv::Tensor;
+    using stratakv::memory::BlockPool;
+    using stratakv::memory::PageTable;
+    using stratakv::models::TransformerBlock;
+
+    constexpr std::size_t HIDDEN_DIM = 8;
+    constexpr std::size_t NUM_HEADS = 2;
+    constexpr std::size_t FFN_DIM = 16;
+    constexpr int TOTAL_BLOCKS = 8;
+    constexpr int BLOCK_SIZE = 4;
+    constexpr int SEQ_ID = 1;
+    constexpr std::size_t NEW_TOKENS = 5;
+
+    std::cout << "\n";
+    print_sep('=');
+    std::cout << "  StrataKV -- Phase 4: Transformer Block Smoke Test\n";
+    print_sep('=');
+
+    try {
+        BlockPool pool(TOTAL_BLOCKS, BLOCK_SIZE);
+        PageTable page_table;
+
+        // Sequence 2 claims block 1 between sequence 1's first and second
+        // pages. This makes sequence 1's eventual [0, 2] mapping non-contiguous.
+        page_table.allocate_sequence(SEQ_ID, pool);
+        page_table.allocate_sequence(2, pool);
+
+        TransformerBlock block(
+            HIDDEN_DIM, FFN_DIM, NUM_HEADS, TOTAL_BLOCKS, BLOCK_SIZE);
+        Tensor hidden_states({NEW_TOKENS, HIDDEN_DIM});
+        for (std::size_t i = 0; i < hidden_states.num_elements(); ++i) {
+            hidden_states[i] =
+                0.01f * static_cast<float>((i % HIDDEN_DIM) + 1u);
+        }
+
+        Tensor output = block.forward(
+            hidden_states, SEQ_ID, page_table, pool);
+        const auto& sequence = page_table.get_state(SEQ_ID);
+
+        const bool shape_ok =
+            output.ndim() == 2 &&
+            output.shape()[0] == NEW_TOKENS &&
+            output.shape()[1] == HIDDEN_DIM;
+        const bool length_ok =
+            sequence.sequence_length == static_cast<int>(NEW_TOKENS);
+        const bool page_count_ok = sequence.physical_blocks.size() == 2u;
+        const bool non_contiguous =
+            page_count_ok &&
+            sequence.physical_blocks[1] != sequence.physical_blocks[0] + 1;
+        const bool traversed = block.last_attention_blocks_visited() >= 2u;
+
+        std::cout << "  Forward output shape       : ["
+                  << output.shape()[0] << ", " << output.shape()[1]
+                  << "]\n";
+        std::cout << "  Seq 1 physical pages       : [ ";
+        for (int block_id : sequence.physical_blocks) {
+            std::cout << block_id << " ";
+        }
+        std::cout << "]\n";
+        std::cout << "  Physical blocks read       : "
+                  << block.last_attention_blocks_visited() << "\n";
+        std::cout << "  Forward pass               : "
+                  << ((shape_ok && length_ok && page_count_ok &&
+                       non_contiguous && traversed) ? "PASS" : "FAIL")
+                  << "\n";
+
+        page_table.free_sequence(SEQ_ID, pool);
+        page_table.free_sequence(2, pool);
+        const bool pool_reclaimed =
+            pool.free_count() == static_cast<std::size_t>(TOTAL_BLOCKS);
+        std::cout << "  KV pool fully reclaimed     : "
+                  << (pool_reclaimed ? "PASS" : "FAIL") << "\n";
+        print_sep('=');
+
+        return shape_ok && length_ok && page_count_ok &&
+               non_contiguous && traversed && pool_reclaimed;
+    } catch (const std::exception& error) {
+        std::cerr << "  Phase 4 smoke test exception: "
+                  << error.what() << "\n";
+        print_sep('=');
+        return false;
+    }
+}
+
+void run_tokens(const std::filesystem::path& checkpoint) {
+    std::cout << "\n============================================================\n";
+    std::cout << "  StrataKV -- Phase 5: Autoregressive Generation\n";
+    std::cout << "============================================================\n";
+    
+    stratakv::generation::GeneratorConfig cfg;
+    cfg.hidden_dim = 8;
+    cfg.intermediate_dim = 16;
+    cfg.num_heads = 2;
+    cfg.total_blocks = 32;
+    cfg.block_size = 16;
+    cfg.vocab_size = 32;
+    cfg.eos_token_id = 2;
+    
+    std::cout << "Loading weights from: " << checkpoint.string() << " ...\n";
+    stratakv::generation::Generator engine(cfg, stratakv::io::load_safetensors(checkpoint));
+    
+    std::cout << "Generating tokens: ";
+    const auto tokens = engine.generate({1, 5, 7}, 16);
+    for (int id : tokens) std::cout << id << ' ';
+    std::cout << "\n============================================================\n";
+}
+
 // ===========================================================================
 //  main
 // ===========================================================================
-int main() {
+int main(int argc, char** argv) {
     bool all_ok = true;
 
     // =========================================================================
@@ -285,5 +398,20 @@ int main() {
     std::cout << "\n";
 
     all_ok = all_ok && len_ok && blk_count_ok && noncontiguous && free_ok;
+
+    // --- Phase 4: Transformer Block Smoke Test ---
+    all_ok = all_ok && run_phase4_smoke_test();
+
+    // Phase 5: Run the generator if a checkpoint path was passed
+    if (argc > 1) {
+        try {
+            run_tokens(argv[1]);
+        } catch (const std::exception& e) {
+            std::cerr << "Phase 5 execution failed: " << e.what() << '\n';
+        }
+    } else {
+        std::cout << "\n[Info] Pass a .safetensors path as an argument to run the Phase 5 generator.\n";
+    }
+    
     return all_ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }
