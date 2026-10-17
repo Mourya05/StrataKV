@@ -7,6 +7,12 @@
     <ClCompile Include="E:\My Folder\Mourya folder\Projects\StrataKV\src\cpu\gemm_cpu.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="E:\My Folder\Mourya folder\Projects\StrataKV\src\memory\block_pool.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="E:\My Folder\Mourya folder\Projects\StrataKV\src\memory\page_table.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <CudaCompile Include="..\src\cuda\gemm_cuda.cu">
