@@ -10,6 +10,7 @@ struct GeneratorConfig {
     std::size_t hidden_dim = 0;
     std::size_t intermediate_dim = 0;
     std::size_t num_heads = 0;
+    std::size_t num_kv_heads = 0; // Zero selects num_heads (standard MHA).
     std::size_t num_layers = 0;
     int total_blocks = 0;
     int block_size = 0;
@@ -29,6 +30,7 @@ struct GeneratorConfig {
         : hidden_dim(hidden)
         , intermediate_dim(intermediate)
         , num_heads(heads)
+        , num_kv_heads(0)
         , num_layers(1)
         , total_blocks(total)
         , block_size(block)
@@ -45,6 +47,25 @@ struct GeneratorConfig {
         : hidden_dim(hidden)
         , intermediate_dim(intermediate)
         , num_heads(heads)
+        , num_kv_heads(0)
+        , num_layers(layers)
+        , total_blocks(total)
+        , block_size(block)
+        , vocab_size(vocab)
+        , eos_token_id(eos) {}
+    GeneratorConfig(std::size_t hidden,
+                    std::size_t intermediate,
+                    std::size_t heads,
+                    std::size_t kv_heads,
+                    std::size_t layers,
+                    int total,
+                    int block,
+                    std::size_t vocab,
+                    int eos)
+        : hidden_dim(hidden)
+        , intermediate_dim(intermediate)
+        , num_heads(heads)
+        , num_kv_heads(kv_heads)
         , num_layers(layers)
         , total_blocks(total)
         , block_size(block)

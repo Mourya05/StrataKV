@@ -121,6 +121,10 @@ endif()
 add_executable(stratakv_run src/main.cpp)
 target_link_libraries(stratakv_run PRIVATE stratakv)
 
+# Minimal token-in/token-out bridge for scripted inference.
+add_executable(stratakv_cli src/cli.cpp)
+target_link_libraries(stratakv_cli PRIVATE stratakv)
+
 # Benchmarking runner to profile CPU vs GPU GEMM
 add_executable(benchmark_gemm benchmarks/benchmark_gemm.cpp)
 target_link_libraries(benchmark_gemm PRIVATE stratakv)

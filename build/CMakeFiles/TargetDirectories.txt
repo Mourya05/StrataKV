@@ -1,5 +1,6 @@
 E:/My Folder/Mourya folder/Projects/StrataKV/build/CMakeFiles/stratakv.dir
 E:/My Folder/Mourya folder/Projects/StrataKV/build/CMakeFiles/stratakv_run.dir
+E:/My Folder/Mourya folder/Projects/StrataKV/build/CMakeFiles/stratakv_cli.dir
 E:/My Folder/Mourya folder/Projects/StrataKV/build/CMakeFiles/benchmark_gemm.dir
 E:/My Folder/Mourya folder/Projects/StrataKV/build/CMakeFiles/Experimental.dir
 E:/My Folder/Mourya folder/Projects/StrataKV/build/CMakeFiles/Nightly.dir

@@ -17,6 +17,11 @@ public:
                    std::size_t num_heads,
                    int total_blocks,
                    int block_size);
+    PagedAttention(std::size_t hidden_dim,
+                   std::size_t num_heads,
+                   std::size_t num_kv_heads,
+                   int total_blocks,
+                   int block_size);
 
     PagedAttention(const PagedAttention&)            = delete;
     PagedAttention& operator=(const PagedAttention&) = delete;
@@ -55,20 +60,23 @@ private:
     std::size_t cache_offset(int physical_block,
                              std::size_t slot) const;
 
+    std::size_t hidden_dim_;
+    std::size_t num_heads_;
+    std::size_t num_kv_heads_;
+    std::size_t head_dim_;
+    std::size_t num_groups_;
+    std::size_t kv_dim_;
+    int total_blocks_;
+    int block_size_;
+    std::vector<float> rope_inv_freq_;
+
     Linear q_proj_;
     Linear k_proj_;
     Linear v_proj_;
     Linear out_proj_;
 
-    std::size_t hidden_dim_;
-    std::size_t num_heads_;
-    std::size_t head_dim_;
-    int total_blocks_;
-    int block_size_;
-    std::vector<float> rope_inv_freq_;
-
-    // [total_blocks, block_size, hidden_dim]. A physical block ID is the
-    // first index; the page table supplies that ID for each logical position.
+    // [total_blocks, block_size, kv_dim]. A physical block ID is the first
+    // index; the page table supplies that ID for each logical position.
     std::optional<Tensor> key_cache_;
     std::optional<Tensor> value_cache_;
     std::size_t last_blocks_visited_ = 0;

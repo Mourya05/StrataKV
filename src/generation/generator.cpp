@@ -26,8 +26,10 @@ std::size_t checked_elements(std::initializer_list<std::size_t> dims) {
 }
 
 GeneratorConfig validate_config(GeneratorConfig c) {
+    const std::size_t kv_heads =
+        c.num_kv_heads == 0 ? c.num_heads : c.num_kv_heads;
     if (c.hidden_dim == 0 || c.intermediate_dim == 0 || c.num_heads == 0 ||
-        c.num_layers == 0 ||
+        c.num_layers == 0 || kv_heads == 0 || c.num_heads % kv_heads != 0 ||
         c.vocab_size == 0 || c.vocab_size > static_cast<std::size_t>(INT_MAX) ||
         c.total_blocks <= 0 || c.block_size <= 0 ||
         c.hidden_dim % c.num_heads != 0 || c.eos_token_id < -1 ||
@@ -39,12 +41,13 @@ GeneratorConfig validate_config(GeneratorConfig c) {
     checked_elements({c.vocab_size, c.hidden_dim});
     checked_elements({c.num_layers, c.hidden_dim, c.hidden_dim});
     checked_elements({c.num_layers, c.hidden_dim, c.intermediate_dim});
+    const std::size_t kv_dim =
+        kv_heads * (c.hidden_dim / c.num_heads);
+    checked_elements({c.num_layers, c.hidden_dim, kv_dim});
     checked_elements({c.num_layers,
                       static_cast<std::size_t>(c.total_blocks),
                       static_cast<std::size_t>(c.block_size),
-                      c.hidden_dim});
-    checked_elements({static_cast<std::size_t>(c.total_blocks),
-                      static_cast<std::size_t>(c.block_size), c.hidden_dim});
+                      kv_dim});
     return c;
 }
 
@@ -53,8 +56,8 @@ std::vector<models::TransformerBlock> make_blocks(const GeneratorConfig& config)
     blocks.reserve(config.num_layers);
     for (std::size_t layer = 0; layer < config.num_layers; ++layer) {
         blocks.emplace_back(config.hidden_dim, config.intermediate_dim,
-                            config.num_heads, config.total_blocks,
-                            config.block_size);
+                            config.num_heads, config.num_kv_heads,
+                            config.total_blocks, config.block_size);
     }
     return blocks;
 }

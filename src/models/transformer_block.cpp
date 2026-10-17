@@ -11,9 +11,18 @@ TransformerBlock::TransformerBlock(std::size_t hidden_dim,
                                    std::size_t num_heads,
                                    int total_blocks,
                                    int block_size)
+    : TransformerBlock(hidden_dim, intermediate_dim, num_heads, 0,
+                       total_blocks, block_size) {}
+
+TransformerBlock::TransformerBlock(std::size_t hidden_dim,
+                                   std::size_t intermediate_dim,
+                                   std::size_t num_heads,
+                                   std::size_t num_kv_heads,
+                                   int total_blocks,
+                                   int block_size)
     : hidden_dim_(hidden_dim)
     , norm1_(hidden_dim)
-    , attention_(hidden_dim, num_heads, total_blocks, block_size)
+    , attention_(hidden_dim, num_heads, num_kv_heads, total_blocks, block_size)
     , norm2_(hidden_dim)
     , gate_proj_(hidden_dim, intermediate_dim)
     , up_proj_(hidden_dim, intermediate_dim)

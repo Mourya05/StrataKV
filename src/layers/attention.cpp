@@ -15,15 +15,25 @@ PagedAttention::PagedAttention(std::size_t hidden_dim,
                                std::size_t num_heads,
                                int total_blocks,
                                int block_size)
-    : q_proj_(hidden_dim, hidden_dim)
-    , k_proj_(hidden_dim, hidden_dim)
-    , v_proj_(hidden_dim, hidden_dim)
-    , out_proj_(hidden_dim, hidden_dim)
-    , hidden_dim_(hidden_dim)
+    : PagedAttention(hidden_dim, num_heads, 0, total_blocks, block_size) {}
+
+PagedAttention::PagedAttention(std::size_t hidden_dim,
+                               std::size_t num_heads,
+                               std::size_t num_kv_heads,
+                               int total_blocks,
+                               int block_size)
+    : hidden_dim_(hidden_dim)
     , num_heads_(num_heads)
+    , num_kv_heads_(num_kv_heads == 0 ? num_heads : num_kv_heads)
     , head_dim_(num_heads == 0 ? 0 : hidden_dim / num_heads)
+    , num_groups_(num_kv_heads_ == 0 ? 0 : num_heads / num_kv_heads_)
+    , kv_dim_(num_kv_heads_ * head_dim_)
     , total_blocks_(total_blocks)
     , block_size_(block_size)
+    , q_proj_(hidden_dim_, hidden_dim_)
+    , k_proj_(hidden_dim_, kv_dim_)
+    , v_proj_(hidden_dim_, kv_dim_)
+    , out_proj_(hidden_dim_, hidden_dim_)
 {
     if (hidden_dim == 0 || num_heads == 0) {
         throw std::invalid_argument(
@@ -32,6 +42,10 @@ PagedAttention::PagedAttention(std::size_t hidden_dim,
     if (hidden_dim % num_heads != 0) {
         throw std::invalid_argument(
             "PagedAttention: hidden_dim must be divisible by num_heads");
+    }
+    if (num_kv_heads_ == 0 || num_heads_ % num_kv_heads_ != 0) {
+        throw std::invalid_argument(
+            "PagedAttention: num_kv_heads must divide num_heads");
     }
     if (head_dim_ % 2 != 0) {
         throw std::invalid_argument(
@@ -62,7 +76,7 @@ void PagedAttention::ensure_cache(const memory::BlockPool& block_pool) {
         const std::vector<std::size_t> shape = {
             static_cast<std::size_t>(total_blocks_),
             static_cast<std::size_t>(block_size_),
-            hidden_dim_};
+            kv_dim_};
         // Construct both tensors before publishing either one. This keeps a
         // failed allocation from leaving a half-initialized attention cache.
         Tensor key_cache(shape);
@@ -80,13 +94,13 @@ void PagedAttention::apply_rope(Tensor& queries,
                                 std::size_t token,
                                 std::size_t absolute_position) const {
     float* query_row = queries.data() + token * hidden_dim_;
-    float* key_row = keys.data() + token * hidden_dim_;
+    float* key_row = keys.data() + token * kv_dim_;
 
     for (std::size_t head = 0; head < num_heads_; ++head) {
         const std::size_t head_offset = head * head_dim_;
         for (std::size_t pair = 0; pair < rope_inv_freq_.size(); ++pair) {
-            const std::size_t first = head_offset + 2u * pair;
-            const std::size_t second = first + 1u;
+            const std::size_t first = head_offset + pair;
+            const std::size_t second = first + (head_dim_ / 2u);
             const double angle = static_cast<double>(absolute_position) *
                 static_cast<double>(rope_inv_freq_[pair]);
             const float cosine = static_cast<float>(std::cos(angle));
@@ -96,7 +110,18 @@ void PagedAttention::apply_rope(Tensor& queries,
             const float query_second = query_row[second];
             query_row[first] = query_first * cosine - query_second * sine;
             query_row[second] = query_first * sine + query_second * cosine;
+        }
+    }
 
+    for (std::size_t head = 0; head < num_kv_heads_; ++head) {
+        const std::size_t head_offset = head * head_dim_;
+        for (std::size_t pair = 0; pair < rope_inv_freq_.size(); ++pair) {
+            const std::size_t first = head_offset + pair;
+            const std::size_t second = first + (head_dim_ / 2u);
+            const double angle = static_cast<double>(absolute_position) *
+                static_cast<double>(rope_inv_freq_[pair]);
+            const float cosine = static_cast<float>(std::cos(angle));
+            const float sine = static_cast<float>(std::sin(angle));
             const float key_first = key_row[first];
             const float key_second = key_row[second];
             key_row[first] = key_first * cosine - key_second * sine;
@@ -118,7 +143,7 @@ std::size_t PagedAttention::cache_offset(int physical_block,
     }
 
     return (static_cast<std::size_t>(physical_block) *
-            static_cast<std::size_t>(block_size_) + slot) * hidden_dim_;
+            static_cast<std::size_t>(block_size_) + slot) * kv_dim_;
 }
 
 Tensor PagedAttention::forward(const Tensor& hidden_states,
@@ -217,10 +242,10 @@ Tensor PagedAttention::forward(const Tensor& hidden_states,
 
         const int physical_block = state.physical_blocks.at(page_index);
         const std::size_t offset = cache_offset(physical_block, slot);
-        std::copy_n(keys.data() + token * hidden_dim_,
-                    hidden_dim_, key_cache_data + offset);
-        std::copy_n(values.data() + token * hidden_dim_,
-                    hidden_dim_, value_cache_data + offset);
+        std::copy_n(keys.data() + token * kv_dim_,
+                    kv_dim_, key_cache_data + offset);
+        std::copy_n(values.data() + token * kv_dim_,
+                    kv_dim_, value_cache_data + offset);
 
         // Causal attention. Each logical position is translated through the
         // page table, so logical pages may be physically scattered.
@@ -231,6 +256,8 @@ Tensor PagedAttention::forward(const Tensor& hidden_states,
 
         for (std::size_t head = 0; head < num_heads_; ++head) {
             const std::size_t head_offset = head * head_dim_;
+            const std::size_t kv_head = head / num_groups_;
+            const std::size_t kv_head_offset = kv_head * head_dim_;
             std::vector<float> scores(logical_position + 1u);
             float max_score = -std::numeric_limits<float>::infinity();
 
@@ -258,7 +285,7 @@ Tensor PagedAttention::forward(const Tensor& hidden_states,
                 }
 
                 const float* key =
-                    key_cache_data + position_offset + head_offset;
+                    key_cache_data + position_offset + kv_head_offset;
                 float dot = 0.0f;
                 for (std::size_t d = 0; d < head_dim_; ++d) {
                     dot += query_row[head_offset + d] * key[d];
@@ -291,7 +318,7 @@ Tensor PagedAttention::forward(const Tensor& hidden_states,
                     const std::size_t position_offset =
                         cache_offset(position_block, position_slot);
                     const float* value =
-                        value_cache_data + position_offset + head_offset;
+                        value_cache_data + position_offset + kv_head_offset;
                     accumulated +=
                         (scores[position] / denominator) * value[d];
                 }

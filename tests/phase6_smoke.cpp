@@ -1,6 +1,7 @@
 #include "stratakv/generation/generator.h"
 #include "stratakv/layers/attention.h"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -34,6 +35,16 @@ void add_identity(stratakv::io::WeightMap& weights,
     stratakv::Tensor value({dimension, dimension});
     for (std::size_t row = 0; row < dimension; ++row)
         value[row * dimension + row] = 1.0f;
+    weights.emplace(key, std::move(value));
+}
+
+void add_rectangular_identity(stratakv::io::WeightMap& weights,
+                              const std::string& key,
+                              std::size_t output,
+                              std::size_t input) {
+    stratakv::Tensor value({output, input});
+    for (std::size_t index = 0; index < (std::min)(output, input); ++index)
+        value[index * input + index] = 1.0f;
     weights.emplace(key, std::move(value));
 }
 
@@ -84,6 +95,36 @@ void check_rope() {
           "RoPE test did not append exactly once");
 }
 
+void check_gqa_attention() {
+    constexpr std::size_t hidden = 4;
+    stratakv::layers::PagedAttention attention(hidden, 2, 1, 2, 2);
+    check(attention.key_projection().output_dim() == 2,
+          "GQA key projection dimension mismatch");
+    check(attention.value_projection().output_dim() == 2,
+          "GQA value projection dimension mismatch");
+    set_identity(attention.query_projection());
+    set_identity(attention.output_projection());
+    for (std::size_t input = 0; input < hidden; ++input) {
+        for (std::size_t output = 0; output < 2; ++output) {
+            const float value = input == output ? 1.0f : 0.0f;
+            attention.key_projection().weight()[input * 2 + output] = value;
+            attention.value_projection().weight()[input * 2 + output] = value;
+        }
+    }
+
+    stratakv::memory::BlockPool pool(2, 2);
+    stratakv::memory::PageTable pages;
+    pages.allocate_sequence(0, pool);
+    stratakv::Tensor input({2, hidden});
+    input[0] = 1.0f;
+    input[5] = 1.0f;
+    const stratakv::Tensor output = attention.forward(input, 0, pages, pool);
+    check(output.shape() == std::vector<std::size_t>({2, hidden}),
+          "GQA attention output shape mismatch");
+    check(pages.get_state(0).sequence_length == 2,
+          "GQA attention appended an incorrect number of tokens");
+}
+
 void check_swiglu() {
     constexpr std::size_t hidden = 4;
     stratakv::models::TransformerBlock block(hidden, hidden, 2, 2, 2);
@@ -110,6 +151,8 @@ stratakv::io::WeightMap make_llama_weights() {
     constexpr std::size_t intermediate = 4;
     constexpr std::size_t vocab = 3;
     constexpr std::size_t layers = 2;
+    constexpr std::size_t kv_heads = 1;
+    constexpr std::size_t kv_dim = hidden / 2 * kv_heads;
     stratakv::io::WeightMap weights;
     add(weights, "model.embed_tokens.weight", {vocab, hidden}, 0.0f);
     weights.at("model.embed_tokens.weight")[0] = 1.0f;
@@ -121,8 +164,10 @@ stratakv::io::WeightMap make_llama_weights() {
         add(weights, prefix + "input_layernorm.weight", {hidden}, 1.0f);
         add(weights, prefix + "post_attention_layernorm.weight", {hidden}, 1.0f);
         add_identity(weights, prefix + "self_attn.q_proj.weight", hidden);
-        add_identity(weights, prefix + "self_attn.k_proj.weight", hidden);
-        add_identity(weights, prefix + "self_attn.v_proj.weight", hidden);
+        add_rectangular_identity(weights, prefix + "self_attn.k_proj.weight",
+                                 kv_dim, hidden);
+        add_rectangular_identity(weights, prefix + "self_attn.v_proj.weight",
+                                 kv_dim, hidden);
         add_identity(weights, prefix + "self_attn.o_proj.weight", hidden);
         add(weights, prefix + "mlp.gate_proj.weight",
             {intermediate, hidden}, 0.0f);
@@ -139,6 +184,7 @@ void check_multi_layer_generator() {
     config.hidden_dim = 4;
     config.intermediate_dim = 4;
     config.num_heads = 2;
+    config.num_kv_heads = 1;
     config.num_layers = 2;
     config.total_blocks = 4;
     config.block_size = 2;
@@ -159,6 +205,7 @@ void check_multi_layer_generator() {
 int main() {
     try {
         check_rope();
+        check_gqa_attention();
         check_swiglu();
         check_multi_layer_generator();
         std::cout << "Phase 6: smoke checks passed\n";
