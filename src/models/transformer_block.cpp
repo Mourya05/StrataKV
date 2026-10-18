@@ -59,6 +59,25 @@ TransformerBlock::TransformerBlock(std::size_t hidden_dim,
     }
 }
 
+void TransformerBlock::to(Device device) {
+    norm1_.gamma() = norm1_.gamma().to(device);
+    norm2_.gamma() = norm2_.gamma().to(device);
+
+    auto migrate_linear = [device](layers::Linear& linear) {
+        linear.set_weight(linear.weight().to(device));
+        if (Tensor* bias = linear.bias())
+            *bias = bias->to(device);
+    };
+
+    migrate_linear(attention_.query_projection());
+    migrate_linear(attention_.key_projection());
+    migrate_linear(attention_.value_projection());
+    migrate_linear(attention_.output_projection());
+    migrate_linear(gate_proj_);
+    migrate_linear(up_proj_);
+    migrate_linear(down_proj_);
+}
+
 Tensor TransformerBlock::forward(const Tensor& hidden_states,
                                  int seq_id,
                                  memory::PageTable& page_table,

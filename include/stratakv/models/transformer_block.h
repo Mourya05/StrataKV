@@ -31,6 +31,10 @@ public:
     TransformerBlock& operator=(TransformerBlock&&) noexcept = default;
     ~TransformerBlock() = default;
 
+    // Move every parameter owned by the block, including attention/FFN
+    // projections and both RMSNorm gamma tensors, to the requested device.
+    void to(Device device);
+
     Tensor forward(const Tensor& hidden_states,
                    int seq_id,
                    memory::PageTable& page_table,

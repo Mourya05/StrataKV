@@ -238,29 +238,8 @@ Generator::Generator(GeneratorConfig config, io::WeightMap weights)
     final_norm_ = layers::RMSNorm(
         final_norm_.gamma().to(Device::GPU), final_norm_.epsilon());
     lm_head_.set_weight(lm_head_.weight().to(Device::GPU));
-    for (auto& block : blocks_) {
-        block.input_norm() = layers::RMSNorm(
-            block.input_norm().gamma().to(Device::GPU),
-            block.input_norm().epsilon());
-        block.post_attention_norm() = layers::RMSNorm(
-            block.post_attention_norm().gamma().to(Device::GPU),
-            block.post_attention_norm().epsilon());
-        auto& attention = block.attention();
-        attention.query_projection().set_weight(
-            attention.query_projection().weight().to(Device::GPU));
-        attention.key_projection().set_weight(
-            attention.key_projection().weight().to(Device::GPU));
-        attention.value_projection().set_weight(
-            attention.value_projection().weight().to(Device::GPU));
-        attention.output_projection().set_weight(
-            attention.output_projection().weight().to(Device::GPU));
-        block.gate_projection().set_weight(
-            block.gate_projection().weight().to(Device::GPU));
-        block.up_projection().set_weight(
-            block.up_projection().weight().to(Device::GPU));
-        block.down_projection().set_weight(
-            block.down_projection().weight().to(Device::GPU));
-    }
+    for (auto& block : blocks_)
+        block.to(Device::GPU);
     gpu_embedding_input_.emplace(
         std::vector<std::size_t>{1, config_.hidden_dim}, DataType::FP32,
         Device::GPU);
