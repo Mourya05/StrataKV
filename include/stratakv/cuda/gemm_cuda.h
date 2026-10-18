@@ -19,6 +19,10 @@ void rmsnorm_cuda(const float* input, float* output, const float* weight,
 
 // Apply SwiGLU in place to a merged [gate, up] FP32 device vector.
 void swiglu_cuda(float* tensor, int hidden_size);
+
+// Apply split-half RoPE in place to contiguous FP32 head vectors.
+void rope_split_half_cuda(float* tensor, const float* cos_ptr,
+                          const float* sin_ptr, int num_heads, int head_dim);
 #endif
 
 } // namespace stratakv

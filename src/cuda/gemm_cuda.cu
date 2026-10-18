@@ -172,6 +172,33 @@ __global__ void swiglu_kernel(float* __restrict__ tensor, int hidden_size)
 }
 
 // ---------------------------------------------------------------------------
+//  rope_split_half_kernel
+//
+//  One block handles one head. The two halves are read before either result
+//  is written, so the transform is safe for the in-place tensor layout.
+// ---------------------------------------------------------------------------
+__global__ void rope_split_half_kernel(float* __restrict__ tensor,
+                                       const float* __restrict__ cos_ptr,
+                                       const float* __restrict__ sin_ptr,
+                                       int head_dim)
+{
+    const int half_dim = head_dim / 2;
+    const int head_offset = static_cast<int>(blockIdx.x) * head_dim;
+
+    for (int index = static_cast<int>(threadIdx.x); index < half_dim;
+         index += ELEMENTWISE_THREADS) {
+        const int first = head_offset + index;
+        const int second = first + half_dim;
+        const float x1 = tensor[first];
+        const float x2 = tensor[second];
+        const float cos_val = cos_ptr[index];
+        const float sin_val = sin_ptr[index];
+        tensor[first] = x1 * cos_val - x2 * sin_val;
+        tensor[second] = x2 * cos_val + x1 * sin_val;
+    }
+}
+
+// ---------------------------------------------------------------------------
 //  gemm_bf16_weight_kernel
 //
 //  BF16 weights stay compressed in host and device memory. Each thread owns a
@@ -396,6 +423,21 @@ void swiglu_cuda(float* tensor, int hidden_size)
     swiglu_kernel<<<(static_cast<unsigned>(hidden_size) +
                      ELEMENTWISE_THREADS - 1) / ELEMENTWISE_THREADS,
                     ELEMENTWISE_THREADS>>>(tensor, hidden_size);
+    CUDA_CHECK_KERNEL();
+}
+
+void rope_split_half_cuda(float* tensor, const float* cos_ptr,
+                          const float* sin_ptr, int num_heads, int head_dim)
+{
+    if (tensor == nullptr || cos_ptr == nullptr || sin_ptr == nullptr ||
+        num_heads <= 0 || head_dim <= 0 || (head_dim % 2) != 0) {
+        throw std::invalid_argument(
+            "rope_split_half_cuda: expected non-null device pointers, "
+            "positive num_heads, and a positive even head_dim");
+    }
+    rope_split_half_kernel<<<static_cast<unsigned>(num_heads),
+                             ELEMENTWISE_THREADS>>>(
+        tensor, cos_ptr, sin_ptr, head_dim);
     CUDA_CHECK_KERNEL();
 }
 
