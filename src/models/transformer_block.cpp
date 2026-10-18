@@ -158,7 +158,7 @@ Tensor TransformerBlock::forward(const Tensor& hidden_states,
             static_cast<float*>(cos_values.raw_data()),
             static_cast<float*>(sin_values.raw_data()), head_dim / 2,
             position, head_dim);
-        rope_split_half_cuda(
+        rope_interleaved_cuda(
             static_cast<float*>(queries.raw_data()),
             static_cast<const float*>(cos_values.raw_data()),
             static_cast<const float*>(sin_values.raw_data()), num_heads,
