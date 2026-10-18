@@ -46,6 +46,10 @@ Tensor RMSNorm::forward(const Tensor& input) const {
         throw std::invalid_argument(
             "RMSNorm::forward: final input dimension must equal hidden_dim");
     }
+    if (input.device() != Device::CPU || gamma_.device() != Device::CPU) {
+        throw std::runtime_error(
+            "RMSNorm::forward: GPU execution is not implemented for RMSNorm");
+    }
 
     Tensor output(input.shape());
     const std::size_t rows = input.num_elements() / hidden_dim_;

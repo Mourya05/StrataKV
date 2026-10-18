@@ -14,14 +14,17 @@ namespace layers {
 PagedAttention::PagedAttention(std::size_t hidden_dim,
                                std::size_t num_heads,
                                int total_blocks,
-                               int block_size)
-    : PagedAttention(hidden_dim, num_heads, 0, total_blocks, block_size) {}
+                               int block_size,
+                               Device device)
+    : PagedAttention(hidden_dim, num_heads, 0, total_blocks, block_size,
+                     device) {}
 
 PagedAttention::PagedAttention(std::size_t hidden_dim,
                                std::size_t num_heads,
                                std::size_t num_kv_heads,
                                int total_blocks,
-                               int block_size)
+                               int block_size,
+                               Device device)
     : hidden_dim_(hidden_dim)
     , num_heads_(num_heads)
     , num_kv_heads_(num_kv_heads == 0 ? num_heads : num_kv_heads)
@@ -30,6 +33,7 @@ PagedAttention::PagedAttention(std::size_t hidden_dim,
     , kv_dim_(num_kv_heads_ * head_dim_)
     , total_blocks_(total_blocks)
     , block_size_(block_size)
+    , device_(device)
     , q_proj_(hidden_dim_, hidden_dim_)
     , k_proj_(hidden_dim_, kv_dim_)
     , v_proj_(hidden_dim_, kv_dim_)
@@ -79,8 +83,8 @@ void PagedAttention::ensure_cache(const memory::BlockPool& block_pool) {
             kv_dim_};
         // Construct both tensors before publishing either one. This keeps a
         // failed allocation from leaving a half-initialized attention cache.
-        Tensor key_cache(shape);
-        Tensor value_cache(shape);
+        Tensor key_cache(shape, DataType::FP32, device_);
+        Tensor value_cache(shape, DataType::FP32, device_);
         key_cache_ = std::move(key_cache);
         value_cache_ = std::move(value_cache);
     } else if (!key_cache_ || !value_cache_) {
@@ -151,6 +155,13 @@ Tensor PagedAttention::forward(const Tensor& hidden_states,
                                memory::PageTable& page_table,
                                memory::BlockPool& block_pool,
                                bool append_tokens) {
+    if (device_ == Device::GPU)
+        throw std::runtime_error(
+            "PagedAttention: GPU cache allocation is available, but the "
+            "paged attention kernels are not implemented");
+    if (hidden_states.device() != Device::CPU)
+        throw std::invalid_argument(
+            "PagedAttention: CPU attention requires CPU hidden states");
     if (hidden_states.ndim() != 2 ||
         hidden_states.shape()[1] != hidden_dim_) {
         throw std::invalid_argument(

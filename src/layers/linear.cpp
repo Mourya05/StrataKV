@@ -92,15 +92,40 @@ Tensor Linear::forward(const Tensor& input) const {
             std::to_string(input_dim_));
     }
 
-    Tensor output({input.shape()[0], output_dim_});
+    if (input.device() != weight_.device()) {
+        throw std::invalid_argument(
+            "Linear::forward: input and weight must share a device");
+    }
+    Tensor output({input.shape()[0], output_dim_}, DataType::FP32,
+                  input.device());
 
 #if defined(STRATAKV_HAS_CUDA)
-    matmul_cuda_tiled(input, weight_, output);
+    if (input.device() == Device::GPU)
+        matmul_cuda_tiled(input, weight_, output);
+    else
+        matmul_cpu_avx2(input, weight_, output);
 #else
+    if (input.device() == Device::GPU) {
+        throw std::runtime_error(
+            "Linear::forward: GPU tensors require CUDA support");
+    }
     matmul_cpu_avx2(input, weight_, output);
 #endif
 
     if (bias_) {
+#if defined(STRATAKV_HAS_CUDA)
+        if (output.device() == Device::GPU) {
+            if (bias_->device() != Device::GPU)
+                throw std::invalid_argument(
+                    "Linear::forward: GPU bias must be GPU-resident");
+            add_bias_cuda(output, *bias_);
+            return output;
+        }
+#else
+        if (output.device() == Device::GPU)
+            throw std::runtime_error(
+                "Linear::forward: GPU bias requires CUDA support");
+#endif
         const float* bias_data = bias_->data();
         float* output_data = output.data();
         const std::size_t rows = input.shape()[0];

@@ -8,6 +8,9 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#ifdef STRATAKV_HAS_CUDA
+#include <cuda_runtime_api.h>
+#endif
 #ifdef _WIN32
 #include <malloc.h>
 #endif
@@ -21,6 +24,19 @@ void release_aligned(void* p) noexcept {
     std::free(p);
 #endif
 }
+
+#ifdef STRATAKV_HAS_CUDA
+void release_cuda(void* p) noexcept {
+    if (p) (void)cudaFree(p);
+}
+
+void cuda_check(cudaError_t status, const char* operation) {
+    if (status != cudaSuccess) {
+        throw std::runtime_error(std::string("Tensor: ") + operation +
+                                 " failed: " + cudaGetErrorString(status));
+    }
+}
+#endif
 } // namespace
 
 void Tensor::compute_strides() {
@@ -37,12 +53,28 @@ void Tensor::compute_strides() {
     total_elements_ = count;
 }
 
-Tensor::Tensor(const std::vector<std::size_t>& shape, DataType dtype)
-    : dtype_(dtype), shape_(shape) {
+Tensor::Tensor(const std::vector<std::size_t>& shape, DataType dtype,
+               Device device)
+    : device_(device), dtype_(dtype), shape_(shape) {
     compute_strides();
     const std::size_t bytes = (std::max)(total_elements_, std::size_t{1}) *
         element_size();
     void* allocation = nullptr;
+
+    if (device_ == Device::GPU) {
+#ifdef STRATAKV_HAS_CUDA
+        cuda_check(cudaMalloc(&allocation, bytes), "cudaMalloc");
+        owner_ = std::shared_ptr<void>(allocation, release_cuda);
+        data_ptr_ = allocation;
+        if (total_elements_ != 0)
+            cuda_check(cudaMemset(data_ptr_, 0, bytes), "cudaMemset");
+        return;
+#else
+        throw std::runtime_error(
+            "Tensor: GPU storage requested but CUDA support is disabled");
+#endif
+    }
+
 #ifdef _WIN32
     allocation = _aligned_malloc(bytes, 64);
 #else
@@ -57,7 +89,7 @@ Tensor::Tensor(const std::vector<std::size_t>& shape, DataType dtype)
 
 Tensor::Tensor(const std::vector<std::size_t>& shape, float* data,
                std::shared_ptr<void> owner, AliasTag)
-    : data_ptr_(data), dtype_(DataType::FP32), shape_(shape),
+    : data_ptr_(data), device_(Device::CPU), dtype_(DataType::FP32), shape_(shape),
       owner_(std::move(owner)) {
     compute_strides();
     if (!owner_ || !data || reinterpret_cast<std::uintptr_t>(data) % 64 != 0)
@@ -66,7 +98,8 @@ Tensor::Tensor(const std::vector<std::size_t>& shape, float* data,
 
 Tensor::Tensor(const std::vector<std::size_t>& shape, void* data,
                std::shared_ptr<void> owner, DataType dtype, AliasTag)
-    : data_ptr_(data), dtype_(dtype), shape_(shape), owner_(std::move(owner)) {
+    : data_ptr_(data), device_(Device::CPU), dtype_(dtype), shape_(shape),
+      owner_(std::move(owner)) {
     compute_strides();
     if (!owner_ || !data)
         throw std::invalid_argument("Tensor: invalid owner or null alias");
@@ -86,7 +119,60 @@ Tensor Tensor::from_external_bytes(const std::vector<std::size_t>& shape,
     return Tensor(shape, data, std::move(owner), dtype, AliasTag{});
 }
 
-float Tensor::value_at(std::size_t i) const noexcept {
+Tensor::Tensor(Tensor&& other) noexcept
+    : data_ptr_(std::exchange(other.data_ptr_, nullptr)),
+      device_(other.device_),
+      dtype_(other.dtype_),
+      total_elements_(std::exchange(other.total_elements_, 0)),
+      shape_(std::move(other.shape_)), strides_(std::move(other.strides_)),
+      owner_(std::move(other.owner_)) {}
+
+Tensor& Tensor::operator=(Tensor&& other) noexcept {
+    if (this != &other) {
+        owner_ = std::move(other.owner_);
+        data_ptr_ = std::exchange(other.data_ptr_, nullptr);
+        device_ = other.device_;
+        dtype_ = other.dtype_;
+        total_elements_ = std::exchange(other.total_elements_, 0);
+        shape_ = std::move(other.shape_);
+        strides_ = std::move(other.strides_);
+    }
+    return *this;
+}
+
+Tensor Tensor::to(Device target) const {
+    Tensor result(shape_, dtype_, target);
+    const std::size_t bytes = total_elements_ * element_size();
+    if (bytes == 0) return result;
+
+    if (device_ == Device::CPU && target == Device::CPU) {
+        std::memcpy(result.raw_data(), data_ptr_, bytes);
+        return result;
+    }
+
+#ifdef STRATAKV_HAS_CUDA
+    cudaMemcpyKind kind;
+    if (device_ == Device::CPU && target == Device::GPU)
+        kind = cudaMemcpyHostToDevice;
+    else if (device_ == Device::GPU && target == Device::CPU)
+        kind = cudaMemcpyDeviceToHost;
+    else if (device_ == Device::GPU && target == Device::GPU)
+        kind = cudaMemcpyDeviceToDevice;
+    else
+        throw std::logic_error("Tensor: unsupported device transfer");
+    cuda_check(cudaMemcpy(result.raw_data(), data_ptr_, bytes, kind),
+               "cudaMemcpy");
+    return result;
+#else
+    (void)target;
+    throw std::runtime_error(
+        "Tensor: GPU transfer requested but CUDA support is disabled");
+#endif
+}
+
+float Tensor::value_at(std::size_t i) const {
+    if (device_ != Device::CPU)
+        throw std::runtime_error("Tensor: GPU tensor requires to(Device::CPU)");
     if (dtype_ == DataType::FP32)
         return static_cast<const float*>(data_ptr_)[i];
 
@@ -99,7 +185,9 @@ float Tensor::value_at(std::size_t i) const noexcept {
     return value;
 }
 
-void Tensor::set_value(std::size_t i, float value) noexcept {
+void Tensor::set_value(std::size_t i, float value) {
+    if (device_ != Device::CPU)
+        throw std::runtime_error("Tensor: GPU tensor requires to(Device::CPU)");
     if (dtype_ == DataType::FP32) {
         static_cast<float*>(data_ptr_)[i] = value;
         return;
@@ -116,25 +204,6 @@ void Tensor::set_value(std::size_t i, float value) noexcept {
     auto* bytes = static_cast<unsigned char*>(data_ptr_);
     bytes[2 * i] = static_cast<unsigned char>(upper & 0xffu);
     bytes[2 * i + 1] = static_cast<unsigned char>(upper >> 8u);
-}
-
-Tensor::Tensor(Tensor&& other) noexcept
-    : data_ptr_(std::exchange(other.data_ptr_, nullptr)),
-      dtype_(other.dtype_),
-      total_elements_(std::exchange(other.total_elements_, 0)),
-      shape_(std::move(other.shape_)), strides_(std::move(other.strides_)),
-      owner_(std::move(other.owner_)) {}
-
-Tensor& Tensor::operator=(Tensor&& other) noexcept {
-    if (this != &other) {
-        owner_ = std::move(other.owner_);
-        data_ptr_ = std::exchange(other.data_ptr_, nullptr);
-        dtype_ = other.dtype_;
-        total_elements_ = std::exchange(other.total_elements_, 0);
-        shape_ = std::move(other.shape_);
-        strides_ = std::move(other.strides_);
-    }
-    return *this;
 }
 
 std::size_t Tensor::get_flat_index(const std::vector<std::size_t>& idx) const {

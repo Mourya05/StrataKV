@@ -20,8 +20,8 @@ void matmul_cpu_avx2(const Tensor& A, const Tensor& B, Tensor& C);
 //  CUDA GEMM  --  32x32 shared-memory tiled kernel
 //
 //  Same mathematical contract as matmul_cpu_avx2.
-//  Timing includes host<->device memory transfers so the number
-//  is a fair real-world latency (not just kernel time).
+//  GPU tensors remain device-resident; explicit Tensor::to(Device) calls own
+//  transfer timing, while this function measures the direct kernel path.
 //
 //  Only declared when STRATAKV_HAS_CUDA is defined by CMake.
 // ============================================================

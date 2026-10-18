@@ -16,12 +16,14 @@ public:
     PagedAttention(std::size_t hidden_dim,
                    std::size_t num_heads,
                    int total_blocks,
-                   int block_size);
+                   int block_size,
+                   Device device = Device::CPU);
     PagedAttention(std::size_t hidden_dim,
                    std::size_t num_heads,
                    std::size_t num_kv_heads,
                    int total_blocks,
-                   int block_size);
+                   int block_size,
+                   Device device = Device::CPU);
 
     PagedAttention(const PagedAttention&)            = delete;
     PagedAttention& operator=(const PagedAttention&) = delete;
@@ -31,6 +33,8 @@ public:
 
     // hidden_states is [new_tokens, hidden_dim]. Each row is appended to the
     // sequence and then attends causally to all valid sequence positions.
+    // Device::GPU reserves device KV storage, but full GPU attention kernels
+    // are not yet part of this CPU attention implementation.
     Tensor forward(const Tensor& hidden_states,
                    int seq_id,
                    memory::PageTable& page_table,
@@ -50,6 +54,7 @@ public:
     const Linear& value_projection() const noexcept { return v_proj_; }
     Linear&       output_projection()     noexcept { return out_proj_; }
     const Linear& output_projection() const noexcept { return out_proj_; }
+    Device device() const noexcept { return device_; }
 
 private:
     void ensure_cache(const memory::BlockPool& block_pool);
@@ -68,6 +73,7 @@ private:
     std::size_t kv_dim_;
     int total_blocks_;
     int block_size_;
+    Device device_;
     std::vector<float> rope_inv_freq_;
 
     Linear q_proj_;

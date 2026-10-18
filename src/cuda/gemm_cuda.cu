@@ -103,6 +103,17 @@ __global__ void gemm_tiled_kernel(const float* __restrict__ A,
     }
 }
 
+__global__ void add_bias_kernel(float* __restrict__ output,
+                                const float* __restrict__ bias,
+                                int rows, int columns)
+{
+    const int index = static_cast<int>(blockIdx.x) * 256 +
+        static_cast<int>(threadIdx.x);
+    const int total = rows * columns;
+    if (index < total)
+        output[index] += bias[index % columns];
+}
+
 // ---------------------------------------------------------------------------
 //  gemm_bf16_weight_kernel
 //
@@ -194,12 +205,9 @@ __global__ void gemm_bf16_weight_kernel(const Activation* __restrict__ A,
 // ---------------------------------------------------------------------------
 //  matmul_cuda_tiled  --  Host wrapper
 //
-//  Timeline (all included in the caller's timer for a fair real-world metric):
-//    1. cudaMalloc   -- allocate d_A, d_B, d_C in VRAM
-//    2. cudaMemcpy   -- H2D: push A and B
-//    3. kernel       -- compute C = A * B on the GPU
-//    4. cudaMemcpy   -- D2H: pull C back to host
-//    5. cudaFree     -- release VRAM (RAII-style, even on error paths)
+//  Tensor ownership and transfers are handled outside this wrapper. The
+//  persistent path only validates device pointers, launches the kernel, and
+//  synchronizes before returning with C resident in VRAM.
 // ---------------------------------------------------------------------------
 void matmul_cuda_tiled(const Tensor& A, const Tensor& B, Tensor& C)
 {
@@ -225,6 +233,18 @@ void matmul_cuda_tiled(const Tensor& A, const Tensor& B, Tensor& C)
             "matmul_cuda_tiled: output tensor C has wrong shape.");
     }
 
+    const bool all_cpu = A.device() == Device::CPU &&
+        B.device() == Device::CPU && C.device() == Device::CPU;
+    const bool all_gpu = A.device() == Device::GPU &&
+        B.device() == Device::GPU && C.device() == Device::GPU;
+    if (all_cpu) {
+        matmul_cpu_avx2(A, B, C);
+        return;
+    }
+    if (!all_gpu)
+        throw std::invalid_argument(
+            "matmul_cuda_tiled: A, B, and C must share a device");
+
     if (C.dtype() != DataType::FP32) {
         throw std::invalid_argument(
             "matmul_cuda_tiled: output tensor must be FP32");
@@ -236,29 +256,8 @@ void matmul_cuda_tiled(const Tensor& A, const Tensor& B, Tensor& C)
             "matmul_cuda_tiled: BF16 GEMM requires the right input to be BF16");
     }
 
-    const size_t bytes_A = static_cast<size_t>(M) * K *
-        (A.dtype() == DataType::BF16 ? sizeof(std::uint16_t) : sizeof(float));
-    const size_t bytes_B = static_cast<size_t>(K) * N *
-        (B.dtype() == DataType::BF16 ? sizeof(std::uint16_t) : sizeof(float));
-    const size_t bytes_C = static_cast<size_t>(M) * N * sizeof(float);
-
     // ------------------------------------------------------------------
-    //  Step 1: Allocate VRAM
-    // ------------------------------------------------------------------
-    void *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
-
-    CUDA_CHECK(cudaMalloc(&d_A, bytes_A));
-    CUDA_CHECK(cudaMalloc(&d_B, bytes_B));
-    CUDA_CHECK(cudaMalloc(&d_C, bytes_C));
-
-    // ------------------------------------------------------------------
-    //  Step 2: Host -> Device  (included in caller's wall-clock timer)
-    // ------------------------------------------------------------------
-    CUDA_CHECK(cudaMemcpy(d_A, A.raw_data(), bytes_A, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_B, B.raw_data(), bytes_B, cudaMemcpyHostToDevice));
-
-    // ------------------------------------------------------------------
-    //  Step 3: Launch kernel
+    //  Launch directly against persistent Tensor-owned device pointers.
     //
     //  Grid  : each block covers a TILE x TILE patch of C
     //  Block : TILE x TILE threads for FP32, (TILE/2) x TILE for BF16
@@ -279,34 +278,41 @@ void matmul_cuda_tiled(const Tensor& A, const Tensor& B, Tensor& C)
         );
         if (A.dtype() == DataType::BF16) {
             gemm_bf16_weight_kernel<__nv_bfloat16><<<bf16_grid, bf16_block>>>(
-                static_cast<const __nv_bfloat16*>(d_A),
-                static_cast<const __nv_bfloat16*>(d_B),
-                static_cast<float*>(d_C), M, N, K);
+                static_cast<const __nv_bfloat16*>(A.raw_data()),
+                static_cast<const __nv_bfloat16*>(B.raw_data()),
+                static_cast<float*>(C.raw_data()), M, N, K);
         } else {
             gemm_bf16_weight_kernel<float><<<bf16_grid, bf16_block>>>(
-                static_cast<const float*>(d_A),
-                static_cast<const __nv_bfloat16*>(d_B),
-                static_cast<float*>(d_C), M, N, K);
+                static_cast<const float*>(A.raw_data()),
+                static_cast<const __nv_bfloat16*>(B.raw_data()),
+                static_cast<float*>(C.raw_data()), M, N, K);
         }
     } else {
         gemm_tiled_kernel<<<grid, block>>>(
-            static_cast<const float*>(d_A),
-            static_cast<const float*>(d_B),
-            static_cast<float*>(d_C), M, N, K);
+            static_cast<const float*>(A.raw_data()),
+            static_cast<const float*>(B.raw_data()),
+            static_cast<float*>(C.raw_data()), M, N, K);
     }
     CUDA_CHECK_KERNEL();   // sync + error check
+}
 
-    // ------------------------------------------------------------------
-    //  Step 4: Device -> Host
-    // ------------------------------------------------------------------
-    CUDA_CHECK(cudaMemcpy(C.data(), d_C, bytes_C, cudaMemcpyDeviceToHost));
-
-    // ------------------------------------------------------------------
-    //  Step 5: Free VRAM
-    // ------------------------------------------------------------------
-    CUDA_CHECK(cudaFree(d_A));
-    CUDA_CHECK(cudaFree(d_B));
-    CUDA_CHECK(cudaFree(d_C));
+void add_bias_cuda(Tensor& output, const Tensor& bias)
+{
+    if (output.device() != Device::GPU || bias.device() != Device::GPU ||
+        output.dtype() != DataType::FP32 || bias.dtype() != DataType::FP32 ||
+        output.ndim() != 2 || bias.ndim() != 1 ||
+        output.shape()[1] != bias.shape()[0]) {
+        throw std::invalid_argument(
+            "add_bias_cuda: expected GPU FP32 output [rows, columns] and "
+            "GPU FP32 bias [columns]");
+    }
+    const int rows = static_cast<int>(output.shape()[0]);
+    const int columns = static_cast<int>(output.shape()[1]);
+    const int total = rows * columns;
+    add_bias_kernel<<<(static_cast<unsigned>(total) + 255u) / 256u, 256>>>(
+        static_cast<float*>(output.raw_data()),
+        static_cast<const float*>(bias.raw_data()), rows, columns);
+    CUDA_CHECK_KERNEL();
 }
 
 } // namespace stratakv

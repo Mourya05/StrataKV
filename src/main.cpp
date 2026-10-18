@@ -202,13 +202,19 @@ int main(int argc, char** argv) {
     std::cout << "Allocating tensors ... ";
     Tensor A({M, K}), B({K, N}), C_cpu({M, N});
 #if defined(STRATAKV_HAS_CUDA)
-    Tensor C_gpu({M, N});
+    Tensor C_gpu({M, N}, Device::GPU);
 #endif
     std::cout << "done.\n";
 
     std::cout << "Filling A and B with reproducible random data ... ";
     fill_random(A, 1.0f, 42);
     fill_random(B, 1.0f, 43);
+#if defined(STRATAKV_HAS_CUDA)
+    // Upload once and keep operands/output resident for every timed GEMM.
+    // matmul_cuda_tiled consumes these device pointers directly.
+    Tensor A_gpu = A.to(Device::GPU);
+    Tensor B_gpu = B.to(Device::GPU);
+#endif
     std::cout << "done.\n\n";
 
     // --- Benchmark 1: AVX2 CPU -----------------------------------------------
@@ -231,29 +237,30 @@ int main(int argc, char** argv) {
 #if defined(STRATAKV_HAS_CUDA)
     print_sep();
     std::cout << "  [2/2]  GPU  --  32x32 Shared-Memory Tiled CUDA GEMM\n";
-    std::cout << "         (timing = H2D + kernel + D2H)\n";
+    std::cout << "         (operands resident in VRAM; kernel + sync only)\n";
     print_sep();
 
     std::cout << "  Warm-up pass ... ";
-    matmul_cuda_tiled(A, B, C_gpu);
+    matmul_cuda_tiled(A_gpu, B_gpu, C_gpu);
     std::cout << "done.\n";
 
     auto gpu_t0 = Clock::now();
-    matmul_cuda_tiled(A, B, C_gpu);
+    matmul_cuda_tiled(A_gpu, B_gpu, C_gpu);
     auto gpu_t1 = Clock::now();
 
     const double gpu_ms    = Ms(gpu_t1 - gpu_t0).count();
     const double gpu_gflop = flops / (gpu_ms * 1e6);
     const double speedup   = cpu_ms / gpu_ms;
 
-    std::cout << "  Wall time  : " << gpu_ms    << " ms  (incl. PCIe transfer)\n";
+    std::cout << "  Wall time  : " << gpu_ms    << " ms  (kernel + sync)\n";
     std::cout << "  Throughput : " << gpu_gflop << " GFLOP/s\n\n";
 
     print_sep();
     std::cout << "  Correctness: CUDA vs CPU (L-inf norm)\n";
     print_sep();
 
-    const float  diff    = max_abs_diff(C_cpu, C_gpu);
+    const Tensor C_gpu_host = C_gpu.to(Device::CPU);
+    const float  diff    = max_abs_diff(C_cpu, C_gpu_host);
     const bool   correct = (diff < 1e-2f);
     all_ok = all_ok && correct;
 
@@ -268,7 +275,7 @@ int main(int argc, char** argv) {
               << std::setw(10) << std::right << cpu_ms    << " ms"
               << "   " << cpu_gflop << " GFLOP/s\n"
               << std::left
-              << "  " << std::setw(30) << "GPU CUDA (incl. PCIe)"
+              << "  " << std::setw(30) << "GPU CUDA (resident operands)"
               << std::setw(10) << std::right << gpu_ms    << " ms"
               << "   " << gpu_gflop << " GFLOP/s\n";
     print_sep();
