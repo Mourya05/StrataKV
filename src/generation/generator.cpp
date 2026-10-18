@@ -6,17 +6,104 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <initializer_list>
 #include <limits>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <cstdlib>
 
 namespace stratakv::generation {
 namespace {
+#if defined(STRATAKV_HAS_CUDA)
+std::vector<float> host_values_cpu(const Tensor& tensor) {
+    std::vector<float> values(tensor.num_elements());
+    for (std::size_t i = 0; i < values.size(); ++i)
+        values[i] = tensor[i];
+    return values;
+}
+
+std::vector<float> parity_host_values(const Tensor& tensor) {
+    std::vector<float> values(tensor.num_elements());
+    const std::size_t bytes = tensor.num_elements() * tensor.element_size();
+    std::vector<unsigned char> raw(bytes);
+    if (cudaMemcpy(raw.data(), tensor.raw_data(), bytes,
+                   cudaMemcpyDeviceToHost) != cudaSuccess)
+        throw std::runtime_error("Generator: parity device copy failed");
+    if (tensor.dtype() == DataType::FP32) {
+        std::memcpy(values.data(), raw.data(), bytes);
+    } else {
+        const auto* data = reinterpret_cast<const std::uint16_t*>(raw.data());
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            const std::uint32_t bits =
+                static_cast<std::uint32_t>(data[i]) << 16u;
+            std::memcpy(&values[i], &bits, sizeof(float));
+        }
+    }
+    return values;
+}
+
+void parity_final_report(const std::vector<float>& gpu,
+                         const std::vector<float>& cpu) {
+    float max_diff = 0.0f;
+    std::size_t gpu_argmax = 0;
+    std::size_t cpu_argmax = 0;
+    for (std::size_t i = 0; i < gpu.size(); ++i) {
+        max_diff = (std::max)(max_diff, std::fabs(gpu[i] - cpu[i]));
+        if (gpu[i] > gpu[gpu_argmax]) gpu_argmax = i;
+        if (cpu[i] > cpu[cpu_argmax]) cpu_argmax = i;
+    }
+    std::fprintf(stderr,
+                 "[PARITY FINAL] lm_head logits: max_diff = %.9g, "
+                 "gpu_argmax = %zu, cpu_argmax = %zu\n",
+                 max_diff, gpu_argmax, cpu_argmax);
+}
+
+void parity_final_step(int position, const Tensor& gpu_hidden,
+                       const Tensor& cpu_hidden, const layers::RMSNorm& norm,
+                       const layers::Linear& lm_head,
+                       Tensor& gpu_norm, Tensor& gpu_logits) {
+    rmsnorm_cuda(static_cast<const float*>(gpu_hidden.raw_data()),
+                 static_cast<float*>(gpu_norm.raw_data()),
+                 static_cast<const float*>(norm.gamma().raw_data()),
+                 static_cast<int>(gpu_hidden.shape()[1]), norm.epsilon());
+    matmul_cuda_tiled(gpu_norm, lm_head.weight(), gpu_logits);
+
+    const auto gpu_norm_values = parity_host_values(gpu_norm);
+    const auto cpu_hidden_values = host_values_cpu(cpu_hidden);
+    const auto gamma_values = host_values_cpu(norm.gamma().to(Device::CPU));
+    const float sum = std::accumulate(
+        cpu_hidden_values.begin(), cpu_hidden_values.end(), 0.0f,
+        [](float total, float value) { return total + value * value; });
+    const float scale = 1.0f /
+        std::sqrt(sum / cpu_hidden_values.size() + norm.epsilon());
+    std::vector<float> cpu_norm(cpu_hidden_values.size());
+    for (std::size_t i = 0; i < cpu_norm.size(); ++i)
+        cpu_norm[i] = cpu_hidden_values[i] * scale * gamma_values[i];
+    float norm_diff = 0.0f;
+    for (std::size_t i = 0; i < cpu_norm.size(); ++i)
+        norm_diff = (std::max)(norm_diff,
+                               std::fabs(gpu_norm_values[i] - cpu_norm[i]));
+    std::fprintf(stderr, "[PARITY pos=%d] final_norm max_diff = %.9g\n",
+                 position, norm_diff);
+
+    const auto weight_values = host_values_cpu(lm_head.weight().to(Device::CPU));
+    std::vector<float> cpu_logits(lm_head.output_dim(), 0.0f);
+    for (std::size_t col = 0; col < lm_head.output_dim(); ++col)
+        for (std::size_t row = 0; row < lm_head.input_dim(); ++row)
+            cpu_logits[col] += cpu_norm[row] *
+                weight_values[row * lm_head.output_dim() + col];
+    parity_final_report(parity_host_values(gpu_logits), cpu_logits);
+}
+#endif
+
 std::size_t checked_elements(std::initializer_list<std::size_t> dims) {
     const auto byte_limit = (std::min)(
         (std::numeric_limits<std::size_t>::max)() - 63u,
@@ -87,6 +174,54 @@ memory::BlockPool make_pool(const GeneratorConfig& config, Device device) {
     return memory::BlockPool(config.total_blocks, config.block_size);
 }
 
+std::vector<memory::BlockPool> make_pools(const GeneratorConfig& config,
+                                          Device device) {
+    std::vector<memory::BlockPool> pools;
+    pools.reserve(config.num_layers);
+    for (std::size_t i = 0; i < config.num_layers; ++i)
+        pools.push_back(make_pool(config, device));
+    return pools;
+}
+
+std::vector<memory::PageTable> make_pages(const GeneratorConfig& config) {
+    return std::vector<memory::PageTable>(config.num_layers);
+}
+
+#if defined(STRATAKV_HAS_CUDA)
+std::vector<models::TransformerBlock> make_parity_blocks(
+    const GeneratorConfig& config,
+    const std::vector<models::TransformerBlock>& source) {
+    std::vector<models::TransformerBlock> result;
+    result.reserve(config.num_layers);
+    for (std::size_t i = 0; i < config.num_layers; ++i) {
+        result.emplace_back(config.hidden_dim, config.intermediate_dim,
+                            config.num_heads, config.num_kv_heads,
+                            config.total_blocks, config.block_size,
+                            Device::CPU);
+        auto& dst = result.back();
+        const auto& src = source[i];
+        dst.input_norm() = layers::RMSNorm(src.input_norm().gamma().to(Device::CPU));
+        dst.post_attention_norm() =
+            layers::RMSNorm(src.post_attention_norm().gamma().to(Device::CPU));
+        auto copy_linear = [](const layers::Linear& from, layers::Linear& to) {
+            to.set_weight(from.weight().to(Device::CPU));
+        };
+        copy_linear(src.attention().query_projection(),
+                    dst.attention().query_projection());
+        copy_linear(src.attention().key_projection(),
+                    dst.attention().key_projection());
+        copy_linear(src.attention().value_projection(),
+                    dst.attention().value_projection());
+        copy_linear(src.attention().output_projection(),
+                    dst.attention().output_projection());
+        copy_linear(src.gate_projection(), dst.gate_projection());
+        copy_linear(src.up_projection(), dst.up_projection());
+        copy_linear(src.down_projection(), dst.down_projection());
+    }
+    return result;
+}
+#endif
+
 bool has_weight(const io::WeightMap& weights, const std::string& key) {
     return weights.find(key) != weights.end();
 }
@@ -112,10 +247,18 @@ void load_linear(io::WeightMap& weights, const std::string& key,
                  layers::Linear& layer) {
     const auto in = layer.input_dim(), out = layer.output_dim();
     Tensor disk = take(weights, key, {out, in});
-    Tensor dest({in, out}, disk.dtype());
+    // Always transpose through FP32. This makes the matrix layout operation
+    // independent of the source element width, then stores the GPU GEMM
+    // contract as true two-byte BF16 values.
+    Tensor transposed_fp32({in, out}, DataType::FP32);
     for (std::size_t o = 0; o < out; ++o)
         for (std::size_t i = 0; i < in; ++i)
-            dest[i * out + o] = disk[o * in + i];
+            transposed_fp32[i * out + o] = disk[o * in + i];
+    Tensor dest({in, out}, DataType::BF16);
+    if (dest.element_size() != sizeof(std::uint16_t))
+        throw std::runtime_error("Generator: Linear BF16 storage width mismatch");
+    for (std::size_t i = 0; i < dest.num_elements(); ++i)
+        dest[i] = transposed_fp32[i];
     layer.set_weight(std::move(dest));
     if (Tensor* bias = layer.bias())
         std::fill_n(bias->data(), bias->num_elements(), 0.0f);
@@ -139,22 +282,25 @@ Tensor take_final_norm(io::WeightMap& weights, const GeneratorConfig& config) {
 // Snapshots recover even unregistered blocks that free_sequence cannot see.
 class SequenceGuard {
 public:
-    SequenceGuard(memory::PageTable& pages, memory::BlockPool& pool)
-        : pages_(pages), pool_(pool), saved_pages_(pages), saved_pool_(pool) {}
+    SequenceGuard(std::vector<memory::PageTable>& pages,
+                  std::vector<memory::BlockPool>& pools)
+        : pages_(pages), pools_(pools), saved_pages_(pages), saved_pools_(pools) {}
     SequenceGuard(const SequenceGuard&) = delete;
     SequenceGuard& operator=(const SequenceGuard&) = delete;
     ~SequenceGuard() noexcept {
         try {
-            if (pages_.has_sequence(0)) pages_.free_sequence(0, pool_);
+            for (std::size_t i = 0; i < pages_.size(); ++i)
+                if (pages_[i].has_sequence(0))
+                    pages_[i].free_sequence(0, pools_[i]);
         } catch (...) { /* Snapshot rollback also handles cleanup failure. */ }
         pages_ = std::move(saved_pages_);
-        pool_ = std::move(saved_pool_);
+        pools_ = std::move(saved_pools_);
     }
 private:
-    memory::PageTable& pages_;
-    memory::BlockPool& pool_;
-    memory::PageTable saved_pages_;
-    memory::BlockPool saved_pool_;
+    std::vector<memory::PageTable>& pages_;
+    std::vector<memory::BlockPool>& pools_;
+    std::vector<memory::PageTable> saved_pages_;
+    std::vector<memory::BlockPool> saved_pools_;
 };
 static_assert(std::is_nothrow_move_assignable_v<memory::PageTable> &&
               std::is_nothrow_move_assignable_v<memory::BlockPool>,
@@ -164,7 +310,8 @@ static_assert(std::is_nothrow_move_assignable_v<memory::PageTable> &&
 Generator::Generator(GeneratorConfig config, io::WeightMap weights)
     : config_(validate_config(config)),
       blocks_(make_blocks(config_, generator_device())),
-      pool_(make_pool(config_, generator_device())),
+      pools_(make_pools(config_, generator_device())),
+      pages_(make_pages(config_)),
       sampler_(config_.sampler),
       embeddings_(take_embedding(weights, config_)),
       final_norm_(take_final_norm(weights, config_)),
@@ -201,6 +348,7 @@ Generator::Generator(GeneratorConfig config, io::WeightMap weights)
             load_linear(weights, prefix + "mlp.down_proj.weight",
                         block.down_projection());
         }
+
     } else {
         // Accept the Phase 5 one-layer schema as a compatibility path. New
         // Llama checkpoints always take the branch above; this path also
@@ -236,11 +384,26 @@ Generator::Generator(GeneratorConfig config, io::WeightMap weights)
 
 #if defined(STRATAKV_HAS_CUDA)
     device_ = Device::GPU;
+    if (embeddings_.dtype() != DataType::FP32) {
+        Tensor embedding_fp32(embeddings_.shape(), DataType::FP32);
+        for (std::size_t i = 0; i < embeddings_.num_elements(); ++i)
+            embedding_fp32[i] = embeddings_[i];
+        embeddings_ = std::move(embedding_fp32);
+    }
     embeddings_ = embeddings_.to(Device::GPU);
     final_norm_.to(Device::GPU);
     lm_head_.to(Device::GPU);
     for (auto& block : blocks_)
         block.to(Device::GPU);
+    if (std::getenv("STRATAKV_PARITY") != nullptr) {
+        blocks_.front().set_parity_diagnostic(true);
+        parity_blocks_ = make_parity_blocks(config_, blocks_);
+        parity_pools_ = make_pools(config_, Device::CPU);
+        parity_pages_ = make_pages(config_);
+        parity_last_cpu_.emplace(
+            std::vector<std::size_t>{1, config_.hidden_dim},
+            DataType::FP32, Device::CPU);
+    }
     gpu_embedding_input_.emplace(
         std::vector<std::size_t>{1, config_.hidden_dim}, DataType::FP32,
         Device::GPU);
@@ -258,6 +421,13 @@ Generator::Generator(GeneratorConfig config, io::WeightMap weights)
         throw std::invalid_argument("Unexpected weight: " + weights.begin()->first);
 }
 
+std::size_t Generator::free_block_count() const noexcept {
+    std::size_t total = 0;
+    for (const auto& pool : pools_)
+        total += pool.free_count();
+    return total;
+}
+
 Tensor Generator::embed(const int* ids, std::size_t count) const {
     const auto h = config_.hidden_dim;
     checked_elements({count, h});
@@ -272,7 +442,13 @@ Tensor Generator::embed(const int* ids, std::size_t count) const {
 void Generator::embed_device(int token_id, Tensor& output) const {
 #if defined(STRATAKV_HAS_CUDA)
     if (device_ != Device::GPU || output.device() != Device::GPU ||
-        output.shape() != std::vector<std::size_t>{1, config_.hidden_dim}) {
+        output.shape() != std::vector<std::size_t>{1, config_.hidden_dim} ||
+        embeddings_.device() != Device::GPU ||
+        embeddings_.dtype() != DataType::FP32 ||
+        embeddings_.shape() !=
+            std::vector<std::size_t>{config_.vocab_size, config_.hidden_dim} ||
+        token_id < 0 ||
+        static_cast<std::size_t>(token_id) >= config_.vocab_size) {
         throw std::invalid_argument("Generator: invalid GPU embedding buffer");
     }
     embedding_lookup_cuda(
@@ -287,10 +463,40 @@ void Generator::embed_device(int token_id, Tensor& output) const {
 }
 
 Tensor Generator::forward(const Tensor& input) {
-    Tensor output = blocks_.front().forward(input, 0, pages_, pool_, true);
-    for (std::size_t layer = 1; layer < blocks_.size(); ++layer) {
-        output = blocks_[layer].forward(output, 0, pages_, pool_, false);
+    Tensor output = input.to(input.device());
+#if defined(STRATAKV_HAS_CUDA)
+    std::vector<std::vector<float>> gpu_layer_values;
+    if (!parity_blocks_.empty())
+        gpu_layer_values.reserve(blocks_.size());
+#endif
+    for (std::size_t layer = 0; layer < blocks_.size(); ++layer) {
+        output = blocks_[layer].forward(
+            output, 0, pages_[layer], pools_[layer], true);
+#if defined(STRATAKV_HAS_CUDA)
+        if (!parity_blocks_.empty())
+            gpu_layer_values.push_back(parity_host_values(output));
+#endif
     }
+#if defined(STRATAKV_HAS_CUDA)
+    if (!parity_blocks_.empty()) {
+        Tensor cpu_input = input.to(Device::CPU);
+        Tensor cpu_output = std::move(cpu_input);
+        for (std::size_t layer = 0; layer < parity_blocks_.size(); ++layer) {
+            cpu_output = parity_blocks_[layer].forward(
+                cpu_output, 0, parity_pages_[layer], parity_pools_[layer],
+                true);
+            const std::vector<float>& gpu_values = gpu_layer_values[layer];
+            float max_diff = 0.0f;
+            for (std::size_t i = 0; i < gpu_values.size(); ++i)
+                max_diff = (std::max)(max_diff,
+                    std::fabs(gpu_values[i] - cpu_output[i]));
+            std::fprintf(stderr, "[PARITY pos=%d layer=%zu] max_diff = %.9g\n",
+                         parity_pages_[layer].get_state(0).sequence_length - 1,
+                         layer, max_diff);
+        }
+        *parity_last_cpu_ = std::move(cpu_output);
+    }
+#endif
     return output;
 }
 
@@ -315,14 +521,42 @@ std::vector<int> Generator::generate(const std::vector<int>& prompt,
     std::vector<int> result;
     result.reserve(required);
     result.insert(result.end(), prompt.begin(), prompt.end());
-    SequenceGuard guard(pages_, pool_); // Armed before sequence allocation.
-    pages_.allocate_sequence(0, pool_);
+    SequenceGuard guard(pages_, pools_); // Armed before sequence allocation.
+    for (std::size_t layer = 0; layer < blocks_.size(); ++layer)
+        pages_[layer].allocate_sequence(0, pools_[layer]);
     Tensor last({1, config_.hidden_dim}, DataType::FP32, device_);
     if (device_ == Device::GPU) {
 #if defined(STRATAKV_HAS_CUDA)
+        const bool parity = std::getenv("STRATAKV_PARITY") != nullptr;
+        bool first_token = true;
+        int prompt_position = 0;
         for (int token : prompt) {
             embed_device(token, *gpu_embedding_input_);
+            if (parity && first_token) {
+                const auto gpu = parity_host_values(*gpu_embedding_input_);
+                const auto embedding = parity_host_values(embeddings_);
+                std::vector<float> cpu(config_.hidden_dim);
+                for (std::size_t i = 0; i < config_.hidden_dim; ++i)
+                    cpu[i] = embedding[static_cast<std::size_t>(token) *
+                                       config_.hidden_dim + i];
+                float max_diff = 0.0f;
+                for (std::size_t i = 0; i < cpu.size(); ++i)
+                    max_diff = (std::max)(max_diff,
+                                          std::fabs(gpu[i] - cpu[i]));
+                std::fprintf(stderr,
+                             "[PARITY L0] embedding: max_diff = %.9g, "
+                             "gpu_sample[0..2] = [%.9g, %.9g, %.9g], "
+                             "cpu_sample[0..2] = [%.9g, %.9g, %.9g]\n",
+                             max_diff, gpu[0], gpu[1], gpu[2],
+                             cpu[0], cpu[1], cpu[2]);
+            }
             last = forward(*gpu_embedding_input_);
+            if (parity && prompt_position < 2)
+                parity_final_step(prompt_position, last, *parity_last_cpu_,
+                                  final_norm_, lm_head_, *gpu_final_norm_,
+                                  *gpu_logits_);
+            first_token = false;
+            ++prompt_position;
         }
 #endif
     } else {
@@ -339,6 +573,16 @@ std::vector<int> Generator::generate(const std::vector<int>& prompt,
                 static_cast<float*>(gpu_final_norm_->raw_data()),
                 static_cast<const float*>(final_norm_.gamma().raw_data()),
                 static_cast<int>(config_.hidden_dim), final_norm_.epsilon());
+            if (lm_head_.weight().device() != Device::GPU ||
+                lm_head_.weight().dtype() != DataType::BF16 ||
+                lm_head_.weight().shape() !=
+                    std::vector<std::size_t>{
+                        config_.hidden_dim, config_.vocab_size} ||
+                gpu_logits_->shape() !=
+                    std::vector<std::size_t>{1, config_.vocab_size}) {
+                throw std::runtime_error(
+                    "Generator: invalid GPU LM head boundary");
+            }
             matmul_cuda_tiled(*gpu_final_norm_, lm_head_.weight(),
                               *gpu_logits_);
             const auto copy_status = cudaMemcpy(
@@ -358,7 +602,44 @@ std::vector<int> Generator::generate(const std::vector<int>& prompt,
                     std::exit(1);
                 }
             }
+            if (host_logits_->shape() !=
+                std::vector<std::size_t>{1, config_.vocab_size} ||
+                host_logits_->num_elements() != config_.vocab_size) {
+                throw std::runtime_error(
+                    "Generator: LM head produced invalid vocabulary shape");
+            }
             next = sampler_.sample(*host_logits_);
+#if defined(STRATAKV_HAS_CUDA)
+            if (std::getenv("STRATAKV_PARITY") != nullptr &&
+                step == 0) {
+                if (!parity_last_cpu_)
+                    throw std::runtime_error(
+                        "Generator: missing CPU parity hidden state");
+                const auto hidden = parity_last_cpu_->to(Device::CPU);
+                const auto gamma = final_norm_.gamma().to(Device::CPU);
+                const auto normalized = host_values_cpu(hidden);
+                const auto gamma_values = host_values_cpu(gamma);
+                const float sum = std::accumulate(
+                    normalized.begin(), normalized.end(), 0.0f,
+                    [](float total, float value) {
+                        return total + value * value;
+                    });
+                const float scale = 1.0f /
+                    std::sqrt(sum / normalized.size() +
+                              final_norm_.epsilon());
+                std::vector<float> norm(normalized.size());
+                for (std::size_t i = 0; i < norm.size(); ++i)
+                    norm[i] = normalized[i] * scale * gamma_values[i];
+                const auto weight = lm_head_.weight().to(Device::CPU);
+                const auto weight_values = host_values_cpu(weight);
+                std::vector<float> cpu(config_.vocab_size, 0.0f);
+                for (std::size_t col = 0; col < config_.vocab_size; ++col)
+                    for (std::size_t row = 0; row < config_.hidden_dim; ++row)
+                        cpu[col] += norm[row] *
+                            weight_values[row * config_.vocab_size + col];
+                parity_final_report(parity_host_values(*gpu_logits_), cpu);
+            }
+#endif
 #endif
         } else {
             Tensor normalized = final_norm_.forward(last);

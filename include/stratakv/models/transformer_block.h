@@ -34,6 +34,9 @@ public:
     // Move every parameter owned by the block, including attention/FFN
     // projections and both RMSNorm gamma tensors, to the requested device.
     void to(Device device);
+    void set_parity_diagnostic(bool enabled) noexcept {
+        parity_diagnostic_ = enabled;
+    }
 
     Tensor forward(const Tensor& hidden_states,
                    int seq_id,
@@ -74,6 +77,7 @@ private:
     layers::Linear gate_proj_;
     layers::Linear up_proj_;
     layers::Linear down_proj_;
+    bool parity_diagnostic_ = false;
 };
 
 } // namespace models

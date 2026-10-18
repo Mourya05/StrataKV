@@ -101,9 +101,54 @@ std::uint64_t le64(const unsigned char* p) noexcept {
         value |= static_cast<std::uint64_t>(p[i]) << (8u * i);
     return value;
 }
+
+std::uint16_t le16(const unsigned char* p) noexcept {
+    return static_cast<std::uint16_t>(
+        static_cast<std::uint16_t>(p[0]) |
+        (static_cast<std::uint16_t>(p[1]) << 8u));
+}
+
+float half_to_float(std::uint16_t value) noexcept {
+    const std::uint32_t sign =
+        static_cast<std::uint32_t>(value & 0x8000u) << 16u;
+    const std::uint32_t exponent = (value >> 10u) & 0x1fu;
+    std::uint32_t mantissa = value & 0x03ffu;
+    std::uint32_t bits = sign;
+
+    if (exponent == 0) {
+        if (mantissa != 0) {
+            int unbiased_exponent = -1;
+            while ((mantissa & 0x0400u) == 0) {
+                mantissa <<= 1u;
+                --unbiased_exponent;
+            }
+            mantissa &= 0x03ffu;
+            bits |= static_cast<std::uint32_t>(
+                unbiased_exponent + 127) << 23u;
+            bits |= mantissa << 13u;
+        }
+    } else if (exponent == 0x1fu) {
+        bits |= 0x7f800000u | (mantissa << 13u);
+    } else {
+        bits |= (exponent + 112u) << 23u;
+        bits |= mantissa << 13u;
+    }
+
+    float result = 0.0f;
+    std::memcpy(&result, &bits, sizeof(result));
+    return result;
+}
+
 bool little_endian() noexcept {
     const std::uint16_t one = 1;
     return *reinterpret_cast<const unsigned char*>(&one) == 1;
+}
+
+bool is_norm_weight(const std::string& name) noexcept {
+    return name.find("norm") != std::string::npos ||
+        name.find("Norm") != std::string::npos ||
+        name.find("gamma") != std::string::npos ||
+        name.find("Gamma") != std::string::npos;
 }
 
 void validate_utf8(std::string_view text) {
@@ -328,7 +373,7 @@ std::vector<Entry> Parser::parse() {
 
 void validate_entries(std::vector<Entry>& entries, std::size_t payload_bytes) {
     for (auto& e : entries) {
-        if (e.dtype != "F32" && e.dtype != "BF16" &&
+        if (e.dtype != "F32" && e.dtype != "F16" && e.dtype != "BF16" &&
             e.dtype != "bfloat16")
             fail("unsupported dtype: " + e.dtype);
         const auto element_size =
@@ -381,45 +426,50 @@ WeightMap load_safetensors(const std::filesystem::path& path,
     result.reserve(entries.size());
     for (const auto& e : entries) {
         unsigned char* source = mapped->data + data_start + e.begin;
+        const bool is_f16 = e.dtype == "F16";
         const bool is_bf16 = e.dtype == "BF16" || e.dtype == "bfloat16";
-        const bool alias = e.count != 0 && little_endian() &&
-            ((e.dtype == "F32" &&
-              reinterpret_cast<std::uintptr_t>(source) % 64u == 0) ||
-             is_bf16);
+        const bool keep_fp32 = is_norm_weight(e.name);
+        const bool alias = keep_fp32 && e.dtype == "F32" && e.count != 0 &&
+            little_endian() &&
+            reinterpret_cast<std::uintptr_t>(source) % 64u == 0;
         if (require_mapped_f32 && e.dtype == "F32" && e.count != 0 && !alias)
             fail("F32 tensor is not directly mappable: " + e.name);
         if (alias) {
-            if (e.dtype == "F32") {
-                result.emplace(e.name, Tensor::from_external(
-                    e.shape, reinterpret_cast<float*>(source), mapped));
-            } else {
-                result.emplace(e.name, Tensor::from_external_bytes(
-                    e.shape, source, mapped, DataType::BF16));
-            }
+            result.emplace(e.name, Tensor::from_external(
+                e.shape, reinterpret_cast<float*>(source), mapped));
             continue;
         }
-        const DataType dtype = e.dtype == "F32"
-            ? DataType::FP32 : DataType::BF16;
+        const DataType dtype = keep_fp32 ? DataType::FP32 : DataType::BF16;
         Tensor converted(e.shape, dtype);
         for (std::size_t i = 0; i < e.count; ++i) {
-            if (is_bf16) {
-                auto* destination = static_cast<unsigned char*>(
-                    converted.raw_data());
-                if (little_endian()) {
-                    destination[2 * i] = source[2 * i];
-                    destination[2 * i + 1] = source[2 * i + 1];
-                } else {
-                    destination[2 * i] = source[2 * i + 1];
-                    destination[2 * i + 1] = source[2 * i];
-                }
+            float value = 0.0f;
+            if (is_f16) {
+                value = half_to_float(le16(source + 2 * i));
+            } else if (is_bf16) {
+                const std::uint16_t bf16 = le16(source + 2 * i);
+                const std::uint32_t bits =
+                    static_cast<std::uint32_t>(bf16) << 16u;
+                std::memcpy(&value, &bits, sizeof(value));
             } else {
                 std::uint32_t bits =
                     static_cast<std::uint32_t>(source[4 * i]) |
                     (static_cast<std::uint32_t>(source[4 * i + 1]) << 8) |
                     (static_cast<std::uint32_t>(source[4 * i + 2]) << 16) |
                     (static_cast<std::uint32_t>(source[4 * i + 3]) << 24);
-                std::memcpy(static_cast<unsigned char*>(converted.raw_data()) +
-                            i * sizeof(float), &bits, sizeof(bits));
+                if (!little_endian())
+                    bits = ((bits & 0x000000ffu) << 24u) |
+                        ((bits & 0x0000ff00u) << 8u) |
+                        ((bits & 0x00ff0000u) >> 8u) |
+                        ((bits & 0xff000000u) >> 24u);
+                std::memcpy(&value, &bits, sizeof(value));
+            }
+            if (keep_fp32) {
+                converted[i] = value;
+            } else {
+                std::uint32_t bits;
+                std::memcpy(&bits, &value, sizeof(bits));
+                static_cast<std::uint16_t*>(converted.raw_data())[i] =
+                    static_cast<std::uint16_t>(bits >> 16u);
             }
         }
         result.emplace(e.name, std::move(converted));

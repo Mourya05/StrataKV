@@ -110,11 +110,17 @@ int Sampler::sample(const Tensor& logits) const {
                   });
 
         float cumulative = 0.0f;
+        bool reached_threshold = false;
         for (std::size_t index : probability_order) {
+            if (reached_threshold) {
+                allowed[index] = 0u;
+                continue;
+            }
             cumulative += weights[index] / total;
-            // The token that crosses top_p is excluded, matching the phase
-            // specification's "cumsum > top_p" masking rule.
-            if (cumulative > config_.top_p) allowed[index] = 0u;
+            // Keep the token that crosses the threshold. Removing it can
+            // erase the entire nucleus when the top token exceeds top_p.
+            if (cumulative >= config_.top_p)
+                reached_threshold = true;
         }
         if (std::none_of(allowed.begin(), allowed.end(),
                          [](unsigned char value) { return value != 0u; })) {
@@ -124,6 +130,9 @@ int Sampler::sample(const Tensor& logits) const {
 
     std::fill(weights.begin(), weights.end(), 0.0f);
     total = 0.0f;
+    max_logit = -std::numeric_limits<float>::infinity();
+    for (std::size_t i = 0; i < vocab; ++i)
+        if (allowed[i]) max_logit = (std::max)(max_logit, values[i]);
     for (std::size_t i = 0; i < vocab; ++i) {
         if (!allowed[i]) continue;
         weights[i] = std::exp(values[i] - max_logit);

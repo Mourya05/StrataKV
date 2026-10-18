@@ -90,19 +90,19 @@ int main(int argc, char** argv) {
         const auto root = std::filesystem::path(argv[1]);
         const auto file = root / "stratakv_phase5_tensor.safetensors";
         const std::string header =
-            R"({"x":{"dtype":"F32","shape":[2],"data_offsets":[0,8]}})";
+            R"({"norm.weight":{"dtype":"F32","shape":[2],"data_offsets":[0,8]}})";
         write_file(file, header, fp32({1.5f, -2.0f}));
         {
             auto weights = stratakv::io::load_safetensors(file, true);
             check(weights.size() == 1);
-            stratakv::Tensor retained = std::move(weights.at("x"));
+            stratakv::Tensor retained = std::move(weights.at("norm.weight"));
             weights.clear();
             check(retained[0] == 1.5f && retained[1] == -2.0f);
             retained[0] = 99; // Private mapping must not modify the disk file.
-            check(stratakv::io::load_safetensors(file, true).at("x")[0] == 1.5f);
+            check(stratakv::io::load_safetensors(file, true).at("norm.weight")[0] == 1.5f);
         }
         write_file(file, header, fp32({1.5f, -2.0f}), false);
-        check(stratakv::io::load_safetensors(file).at("x")[1] == -2);
+        check(stratakv::io::load_safetensors(file).at("norm.weight")[1] == -2);
         rejects([&] { (void)stratakv::io::load_safetensors(file, true); });
         write_file(file,
             R"({"x":{"data_offsets":[0,4],"shape":[2],"dtype":"BF16"}})",
@@ -113,10 +113,20 @@ int main(int argc, char** argv) {
             auto bf = stratakv::io::load_safetensors(file);
             check(bf.at("x")[0] == 1 && bf.at("x")[1] == -2.5f);
         }
+        write_file(file,
+            R"({"x":{"data_offsets":[0,4],"shape":[2],"dtype":"F16"}})",
+            {0x00, 0x3c, 0x00, 0xc1});
+        {
+            auto fp = stratakv::io::load_safetensors(file);
+            check(fp.at("x").dtype() == stratakv::DataType::BF16);
+            check(fp.at("x")[0] == 1 && fp.at("x")[1] == -2.5f);
+        }
 
         write_file(file, R"({"z":{"dtype":"F32","shape":[1],"data_offsets":[4,8]},"a":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}})", fp32({7, 9}));
         {
             auto ordered = stratakv::io::load_safetensors(file);
+            check(ordered.at("a").dtype() == stratakv::DataType::BF16);
+            check(ordered.at("z").dtype() == stratakv::DataType::BF16);
             check(ordered.at("a")[0] == 7 && ordered.at("z")[0] == 9);
         }
         write_file(file, R"({"\uD83D\uDE00":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}})", fp32({7}));
@@ -128,7 +138,6 @@ int main(int argc, char** argv) {
         check(stratakv::io::load_safetensors(file).at("x").num_elements() == 0);
 
         for (const std::string bad : {
-            R"({"x":{"dtype":"F16","shape":[2],"data_offsets":[0,8]}})",
             R"({"x":{"dtype":"F32","shape":[3],"data_offsets":[0,8]}})",
             R"({"x":{"dtype":"F32","dtype":"F32","shape":[2],"data_offsets":[0,8]}})",
             R"({"x":{"dtype":"F32","shape":[02],"data_offsets":[0,8]}})",

@@ -79,6 +79,18 @@ int main(int argc, char** argv) {
             check(nucleus.sample(logits) == 3,
                   "Top-P did not retain the highest-probability token");
 
+        stratakv::generation::Sampler broad_nucleus(
+            stratakv::generation::SamplerConfig{1.0f, 0, 0.8f}, 7u);
+        bool saw_second_choice = false;
+        for (int i = 0; i < 128; ++i) {
+            const int token = broad_nucleus.sample(logits);
+            check(token == 2 || token == 3,
+                  "Top-P emitted a token outside the nucleus");
+            saw_second_choice |= token == 2;
+        }
+        check(saw_second_choice,
+              "Top-P discarded the token at the cumulative threshold");
+
 #if defined(STRATAKV_HAS_CUDA)
         stratakv::Tensor left({2, 3}, stratakv::DataType::BF16);
         stratakv::Tensor right({3, 2}, stratakv::DataType::BF16);

@@ -1,0 +1,15 @@
+C:/Users/birru/.copilot/repos/copilot-worktrees/StrataKV/mourya05-effective-meme/build-phase9-cuda/CMakeFiles/stratakv.dir
+C:/Users/birru/.copilot/repos/copilot-worktrees/StrataKV/mourya05-effective-meme/build-phase9-cuda/CMakeFiles/stratakv_run.dir
+C:/Users/birru/.copilot/repos/copilot-worktrees/StrataKV/mourya05-effective-meme/build-phase9-cuda/CMakeFiles/stratakv_cli.dir
+C:/Users/birru/.copilot/repos/copilot-worktrees/StrataKV/mourya05-effective-meme/build-phase9-cuda/CMakeFiles/benchmark_gemm.dir
+C:/Users/birru/.copilot/repos/copilot-worktrees/StrataKV/mourya05-effective-meme/build-phase9-cuda/CMakeFiles/Experimental.dir
+C:/Users/birru/.copilot/repos/copilot-worktrees/StrataKV/mourya05-effective-meme/build-phase9-cuda/CMakeFiles/Nightly.dir
+C:/Users/birru/.copilot/repos/copilot-worktrees/StrataKV/mourya05-effective-meme/build-phase9-cuda/CMakeFiles/Continuous.dir
+C:/Users/birru/.copilot/repos/copilot-worktrees/StrataKV/mourya05-effective-meme/build-phase9-cuda/CMakeFiles/NightlyMemoryCheck.dir
+C:/Users/birru/.copilot/repos/copilot-worktrees/StrataKV/mourya05-effective-meme/build-phase9-cuda/CMakeFiles/phase5_smoke.dir
+C:/Users/birru/.copilot/repos/copilot-worktrees/StrataKV/mourya05-effective-meme/build-phase9-cuda/CMakeFiles/phase6_smoke.dir
+C:/Users/birru/.copilot/repos/copilot-worktrees/StrataKV/mourya05-effective-meme/build-phase9-cuda/CMakeFiles/phase7_smoke.dir
+C:/Users/birru/.copilot/repos/copilot-worktrees/StrataKV/mourya05-effective-meme/build-phase9-cuda/CMakeFiles/phase8_smoke.dir
+C:/Users/birru/.copilot/repos/copilot-worktrees/StrataKV/mourya05-effective-meme/build-phase9-cuda/CMakeFiles/RUN_TESTS.dir
+C:/Users/birru/.copilot/repos/copilot-worktrees/StrataKV/mourya05-effective-meme/build-phase9-cuda/CMakeFiles/ALL_BUILD.dir
+C:/Users/birru/.copilot/repos/copilot-worktrees/StrataKV/mourya05-effective-meme/build-phase9-cuda/CMakeFiles/ZERO_CHECK.dir

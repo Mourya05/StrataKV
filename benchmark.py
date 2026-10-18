@@ -14,8 +14,8 @@ MAX_NEW_TOKENS = 500
 
 def main():
     repository_root = Path(__file__).resolve().parent
-    model_path = repository_root / "model.safetensors"
-    cli_path = repository_root / "build" / "Release" / "stratakv_cli.exe"
+    model_path = "E:\\My Folder\\Mourya folder\\Projects\\StrataKV\\model.safetensors"
+    cli_path = repository_root / "build-phase9-cuda" / "Release" / "stratakv_cli.exe"
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     raw_prompt_data = tokenizer.apply_chat_template(MESSAGES, add_generation_prompt=True, return_dict=True)

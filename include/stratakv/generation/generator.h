@@ -83,7 +83,7 @@ public:
     Generator(const Generator&) = delete;
     Generator& operator=(const Generator&) = delete;
     std::vector<int> generate(const std::vector<int>& prompt, int max_new_tokens);
-    std::size_t free_block_count() const noexcept { return pool_.free_count(); }
+    std::size_t free_block_count() const noexcept;
 
 private:
     Tensor embed(const int* ids, std::size_t count) const;
@@ -92,14 +92,18 @@ private:
     // Declaration order ensures validation precedes all internal allocations.
     GeneratorConfig config_;
     std::vector<models::TransformerBlock> blocks_;
-    memory::BlockPool pool_;
-    memory::PageTable pages_;
+    std::vector<memory::BlockPool> pools_;
+    std::vector<memory::PageTable> pages_;
     Sampler sampler_;
     Tensor embeddings_; // [vocab, hidden], owns moved checkpoint tensor.
     layers::RMSNorm final_norm_;
     layers::Linear lm_head_; // GEMM-ready [hidden, vocab].
     Device device_ = Device::CPU;
 #if defined(STRATAKV_HAS_CUDA)
+    std::vector<models::TransformerBlock> parity_blocks_;
+    std::vector<memory::BlockPool> parity_pools_;
+    std::vector<memory::PageTable> parity_pages_;
+    std::optional<Tensor> parity_last_cpu_;
     std::optional<Tensor> gpu_embedding_input_;
     std::optional<Tensor> gpu_final_norm_;
     std::optional<Tensor> gpu_logits_;
