@@ -97,6 +97,7 @@ private:
     int* d_block_table_ = nullptr;
     std::size_t d_block_table_capacity_ = 0;
     int staged_seq_id_ = 0;
+    std::size_t staged_block_count_ = 0;
     bool device_table_dirty_ = true;
 };
 

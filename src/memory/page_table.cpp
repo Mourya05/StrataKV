@@ -49,6 +49,7 @@ PageTable& PageTable::operator=(const PageTable& other) {
         release_device_block_table();
         table_ = other.table_;
         staged_seq_id_ = 0;
+        staged_block_count_ = 0;
         device_table_dirty_ = true;
     }
     return *this;
@@ -59,10 +60,12 @@ PageTable::PageTable(PageTable&& other) noexcept
     , d_block_table_(other.d_block_table_)
     , d_block_table_capacity_(other.d_block_table_capacity_)
     , staged_seq_id_(other.staged_seq_id_)
+    , staged_block_count_(other.staged_block_count_)
     , device_table_dirty_(other.device_table_dirty_)
 {
     other.d_block_table_ = nullptr;
     other.d_block_table_capacity_ = 0;
+    other.staged_block_count_ = 0;
     other.device_table_dirty_ = true;
 }
 
@@ -73,9 +76,11 @@ PageTable& PageTable::operator=(PageTable&& other) noexcept {
         d_block_table_ = other.d_block_table_;
         d_block_table_capacity_ = other.d_block_table_capacity_;
         staged_seq_id_ = other.staged_seq_id_;
+        staged_block_count_ = other.staged_block_count_;
         device_table_dirty_ = other.device_table_dirty_;
         other.d_block_table_ = nullptr;
         other.d_block_table_capacity_ = 0;
+        other.staged_block_count_ = 0;
         other.device_table_dirty_ = true;
     }
     return *this;
@@ -92,6 +97,7 @@ void PageTable::release_device_block_table() noexcept {
 #endif
     d_block_table_ = nullptr;
     d_block_table_capacity_ = 0;
+    staged_block_count_ = 0;
     device_table_dirty_ = true;
 }
 
@@ -189,11 +195,13 @@ const int* PageTable::get_device_block_table(int seq_id) {
         d_block_table_capacity_ = required;
         device_table_dirty_ = true;
     }
-    if (device_table_dirty_ || staged_seq_id_ != seq_id) {
+    if (device_table_dirty_ || staged_seq_id_ != seq_id ||
+        staged_block_count_ != required) {
         check_cuda(cudaMemcpy(d_block_table_, state.physical_blocks.data(),
                               required * sizeof(int), cudaMemcpyHostToDevice),
                    "cudaMemcpy(block_table)");
         staged_seq_id_ = seq_id;
+        staged_block_count_ = required;
         device_table_dirty_ = false;
     }
     return d_block_table_;
