@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <cstdlib>
+#include <iostream>
 #include <initializer_list>
 #include <limits>
 #include <stdexcept>
@@ -346,11 +348,31 @@ std::vector<int> Generator::generate(const std::vector<int>& prompt,
                 throw std::runtime_error(
                     std::string("Generator: logits copy failed: ") +
                     cudaGetErrorString(copy_status));
+            for (std::size_t i = 0; i < host_logits_->num_elements(); ++i) {
+                const float value = (*host_logits_)[i];
+                if (std::isnan(value) || std::isinf(value)) {
+                    std::cerr
+                        << "CRITICAL NUMERICAL COLLAPSE: NaN/Inf detected in "
+                           "logits! Safetensors dtype mismatch (FP16 weights "
+                           "fed to BF16 kernel).\n";
+                    std::exit(1);
+                }
+            }
             next = sampler_.sample(*host_logits_);
 #endif
         } else {
             Tensor normalized = final_norm_.forward(last);
             Tensor logits = lm_head_.forward(normalized);
+            for (std::size_t i = 0; i < logits.num_elements(); ++i) {
+                const float value = logits[i];
+                if (std::isnan(value) || std::isinf(value)) {
+                    std::cerr
+                        << "CRITICAL NUMERICAL COLLAPSE: NaN/Inf detected in "
+                           "logits! Safetensors dtype mismatch (FP16 weights "
+                           "fed to BF16 kernel).\n";
+                    std::exit(1);
+                }
+            }
             next = sampler_.sample(logits);
         }
         result.push_back(next);
