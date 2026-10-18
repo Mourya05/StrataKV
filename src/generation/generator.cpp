@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <chrono>
 #include <cstring>
 #include <iostream>
 #include <initializer_list>
@@ -17,11 +18,32 @@
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <thread>
 #include <utility>
 #include <cstdlib>
 
 namespace stratakv::generation {
 namespace {
+template <typename Function>
+void parallel_for(std::size_t count, Function function) {
+    const unsigned workers = std::thread::hardware_concurrency();
+    if (count < 16384 || workers < 2) {
+        function(0, count);
+        return;
+    }
+    const std::size_t thread_count =
+        (std::min)(static_cast<std::size_t>(workers), count);
+    std::vector<std::thread> threads;
+    threads.reserve(thread_count);
+    const std::size_t chunk = (count + thread_count - 1) / thread_count;
+    for (std::size_t begin = 0; begin < count; begin += chunk) {
+        const std::size_t end = (std::min)(count, begin + chunk);
+        threads.emplace_back([=, &function] { function(begin, end); });
+    }
+    for (auto& thread : threads)
+        thread.join();
+}
+
 #if defined(STRATAKV_HAS_CUDA)
 std::vector<float> host_values_cpu(const Tensor& tensor) {
     std::vector<float> values(tensor.num_elements());
@@ -247,18 +269,35 @@ void load_linear(io::WeightMap& weights, const std::string& key,
                  layers::Linear& layer) {
     const auto in = layer.input_dim(), out = layer.output_dim();
     Tensor disk = take(weights, key, {out, in});
-    // Always transpose through FP32. This makes the matrix layout operation
-    // independent of the source element width, then stores the GPU GEMM
-    // contract as true two-byte BF16 values.
-    Tensor transposed_fp32({in, out}, DataType::FP32);
-    for (std::size_t o = 0; o < out; ++o)
-        for (std::size_t i = 0; i < in; ++i)
-            transposed_fp32[i * out + o] = disk[o * in + i];
     Tensor dest({in, out}, DataType::BF16);
     if (dest.element_size() != sizeof(std::uint16_t))
         throw std::runtime_error("Generator: Linear BF16 storage width mismatch");
-    for (std::size_t i = 0; i < dest.num_elements(); ++i)
-        dest[i] = transposed_fp32[i];
+    auto* destination = static_cast<std::uint16_t*>(dest.raw_data());
+    if (disk.dtype() == DataType::BF16) {
+        const auto* source =
+            static_cast<const std::uint16_t*>(disk.raw_data());
+        parallel_for(dest.num_elements(), [&](std::size_t begin,
+                                               std::size_t end) {
+            for (std::size_t index = begin; index < end; ++index) {
+                const std::size_t i = index / out;
+                const std::size_t o = index % out;
+                destination[index] = source[o * in + i];
+            }
+        });
+    } else {
+        parallel_for(dest.num_elements(), [&](std::size_t begin,
+                                               std::size_t end) {
+            for (std::size_t index = begin; index < end; ++index) {
+                const std::size_t i = index / out;
+                const std::size_t o = index % out;
+                float value = disk[o * in + i];
+                std::uint32_t bits;
+                std::memcpy(&bits, &value, sizeof(bits));
+                destination[index] =
+                    static_cast<std::uint16_t>(bits >> 16u);
+            }
+        });
+    }
     layer.set_weight(std::move(dest));
     if (Tensor* bias = layer.bias())
         std::fill_n(bias->data(), bias->num_elements(), 0.0f);
@@ -525,6 +564,7 @@ std::vector<int> Generator::generate(const std::vector<int>& prompt,
         throw std::length_error("Generator: prompt plus max exceeds KV capacity");
     checked_elements({prompt.size(), config_.hidden_dim});
     checked_elements({prompt.size(), config_.intermediate_dim});
+    const auto generation_start = std::chrono::steady_clock::now();
     std::vector<int> result;
     result.reserve(required);
     result.insert(result.end(), prompt.begin(), prompt.end());
@@ -685,6 +725,8 @@ std::vector<int> Generator::generate(const std::vector<int>& prompt,
             last = forward(embed(&next, 1));
         }
     }
+    last_generation_ms_ = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - generation_start).count();
     return result; // Guard restores allocator state, including on exceptions.
 }
 } // namespace stratakv::generation

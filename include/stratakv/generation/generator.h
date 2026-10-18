@@ -84,6 +84,7 @@ public:
     Generator& operator=(const Generator&) = delete;
     std::vector<int> generate(const std::vector<int>& prompt, int max_new_tokens);
     std::size_t free_block_count() const noexcept;
+    double last_generation_ms() const noexcept { return last_generation_ms_; }
 
 private:
     Tensor embed(const int* ids, std::size_t count) const;
@@ -99,6 +100,7 @@ private:
     layers::RMSNorm final_norm_;
     layers::Linear lm_head_; // GEMM-ready [hidden, vocab].
     Device device_ = Device::CPU;
+    double last_generation_ms_ = 0.0;
 #if defined(STRATAKV_HAS_CUDA)
     std::vector<models::TransformerBlock> parity_blocks_;
     std::vector<memory::BlockPool> parity_pools_;

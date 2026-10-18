@@ -8,6 +8,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <chrono>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -139,11 +140,31 @@ int main(int argc, char** argv) {
         config.eos_token_id = 2;
         config.sampler = arguments.sampler;
 
+        const auto load_start = std::chrono::steady_clock::now();
         auto weights = stratakv::io::load_safetensors(
             std::filesystem::path(arguments.model_path));
         stratakv::generation::Generator generator(config, std::move(weights));
+        const auto load_end = std::chrono::steady_clock::now();
+        const auto gen_start = load_end;
         const std::vector<int> output =
             generator.generate(arguments.prompt, arguments.max_new_tokens);
+        const auto gen_end = std::chrono::steady_clock::now();
+        const double load_ms = std::chrono::duration<double, std::milli>(
+            load_end - load_start).count();
+        const double measured_gen_ms = std::chrono::duration<double, std::milli>(
+            gen_end - gen_start).count();
+        const double gen_ms = generator.last_generation_ms() > 0.0
+            ? generator.last_generation_ms() : measured_gen_ms;
+        const std::size_t generated_tokens =
+            output.size() > arguments.prompt.size()
+                ? output.size() - arguments.prompt.size() : 0;
+        const double pure_decode_tps =
+            gen_ms > 0.0 ? static_cast<double>(generated_tokens) /
+                (gen_ms / 1000.0) : 0.0;
+        std::cerr << "[TIMING] load_ms = " << load_ms
+                  << ", gen_ms = " << gen_ms
+                  << ", tokens = " << generated_tokens
+                  << ", pure_decode_tps = " << pure_decode_tps << '\n';
 
         for (std::size_t index = 0; index < output.size(); ++index) {
             if (index != 0) std::cout << ' ';

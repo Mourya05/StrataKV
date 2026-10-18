@@ -12,6 +12,7 @@
 #include <cuda_runtime.h>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 // ---------------------------------------------------------------------------
 //  CUDA_CHECK(expr)
@@ -38,19 +39,15 @@
 //  CUDA_CHECK_KERNEL()
 //
 //  Must be called IMMEDIATELY after a kernel launch (<<<...>>>).
-//  Two steps:
-//    1. cudaGetLastError() -- catches launch-configuration errors
-//       (e.g. invalid block size) that are reported synchronously.
-//    2. cudaDeviceSynchronize() -- waits for the kernel to finish and
-//       surfaces any asynchronous execution errors.
-//
-//  Cost: forces a device sync, so use only in debug/validation paths.
-//  In production hot-paths, use CUDA_CHECK_LAUNCH_ONLY() instead.
+//  Launch errors are always checked. A device synchronization is performed
+//  only when STRATAKV_SYNC_KERNELS=1 is set for debug validation.
 // ---------------------------------------------------------------------------
 #define CUDA_CHECK_KERNEL()                                                    \
     do {                                                                       \
         CUDA_CHECK(::cudaGetLastError());                                      \
-        CUDA_CHECK(::cudaDeviceSynchronize());                                 \
+        if (std::getenv("STRATAKV_SYNC_KERNELS") != nullptr &&                \
+            std::strcmp(std::getenv("STRATAKV_SYNC_KERNELS"), "1") == 0)     \
+            CUDA_CHECK(::cudaDeviceSynchronize());                             \
     } while (0)
 
 // ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@
 
 import time
 import subprocess
+import re
 from pathlib import Path
 from transformers import AutoTokenizer
 
@@ -56,14 +57,30 @@ def main():
         print("Error: Engine returned no tokens.")
         return
 
-    # Subtract prompt tokens from total output to get generated tokens
+    timing_match = re.search(
+        r"\[TIMING\].*?load_ms = ([0-9.eE+-]+), gen_ms = "
+        r"([0-9.eE+-]+), tokens = (\d+), pure_decode_tps = "
+        r"([0-9.eE+-]+)",
+        completed.stderr,
+    )
     generated_count = output_tokens - len(prompt_ids)
-    tps = generated_count / total_time
+    if timing_match:
+        load_ms, gen_ms, timing_tokens, tps = timing_match.groups()
+        generated_count = int(timing_tokens)
+        load_ms = float(load_ms)
+        gen_ms = float(gen_ms)
+        tps = float(tps)
+    else:
+        load_ms = total_time * 1000.0
+        gen_ms = total_time * 1000.0
+        tps = generated_count / total_time
 
     print("\n--- Benchmark Results ---")
     print(f"Total Wall Time:  {total_time:.2f} seconds")
+    print(f"Model Load Time:  {load_ms / 1000.0:.2f} seconds")
+    print(f"Generation Time:  {gen_ms / 1000.0:.2f} seconds")
     print(f"Tokens Generated: {generated_count}")
-    print(f"Throughput:       {tps:.2f} tokens/sec")
+    print(f"Pure Decode TPS:  {tps:.2f} tokens/sec")
     print("-------------------------\n")
     
     print("Output Preview:")

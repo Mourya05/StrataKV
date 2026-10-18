@@ -7,6 +7,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string_view>
+#include <thread>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -25,6 +26,26 @@
 
 namespace stratakv::io {
 namespace {
+template <typename Function>
+void parallel_for(std::size_t count, Function function) {
+    const unsigned workers = std::thread::hardware_concurrency();
+    if (count < 16384 || workers < 2) {
+        function(0, count);
+        return;
+    }
+    const std::size_t thread_count =
+        (std::min)(static_cast<std::size_t>(workers), count);
+    std::vector<std::thread> threads;
+    threads.reserve(thread_count);
+    const std::size_t chunk = (count + thread_count - 1) / thread_count;
+    for (std::size_t begin = 0; begin < count; begin += chunk) {
+        const std::size_t end = (std::min)(count, begin + chunk);
+        threads.emplace_back([=, &function] { function(begin, end); });
+    }
+    for (auto& thread : threads)
+        thread.join();
+}
+
 [[noreturn]] void fail(const std::string& reason) {
     throw std::runtime_error("safetensors: " + reason);
 }
@@ -441,37 +462,39 @@ WeightMap load_safetensors(const std::filesystem::path& path,
         }
         const DataType dtype = keep_fp32 ? DataType::FP32 : DataType::BF16;
         Tensor converted(e.shape, dtype);
-        for (std::size_t i = 0; i < e.count; ++i) {
-            float value = 0.0f;
-            if (is_f16) {
-                value = half_to_float(le16(source + 2 * i));
-            } else if (is_bf16) {
-                const std::uint16_t bf16 = le16(source + 2 * i);
-                const std::uint32_t bits =
-                    static_cast<std::uint32_t>(bf16) << 16u;
-                std::memcpy(&value, &bits, sizeof(value));
-            } else {
-                std::uint32_t bits =
-                    static_cast<std::uint32_t>(source[4 * i]) |
-                    (static_cast<std::uint32_t>(source[4 * i + 1]) << 8) |
-                    (static_cast<std::uint32_t>(source[4 * i + 2]) << 16) |
-                    (static_cast<std::uint32_t>(source[4 * i + 3]) << 24);
-                if (!little_endian())
-                    bits = ((bits & 0x000000ffu) << 24u) |
-                        ((bits & 0x0000ff00u) << 8u) |
-                        ((bits & 0x00ff0000u) >> 8u) |
-                        ((bits & 0xff000000u) >> 24u);
-                std::memcpy(&value, &bits, sizeof(value));
+        parallel_for(e.count, [&](std::size_t begin, std::size_t end) {
+            for (std::size_t i = begin; i < end; ++i) {
+                float value = 0.0f;
+                if (is_f16) {
+                    value = half_to_float(le16(source + 2 * i));
+                } else if (is_bf16) {
+                    const std::uint16_t bf16 = le16(source + 2 * i);
+                    const std::uint32_t bits =
+                        static_cast<std::uint32_t>(bf16) << 16u;
+                    std::memcpy(&value, &bits, sizeof(value));
+                } else {
+                    std::uint32_t bits =
+                        static_cast<std::uint32_t>(source[4 * i]) |
+                        (static_cast<std::uint32_t>(source[4 * i + 1]) << 8) |
+                        (static_cast<std::uint32_t>(source[4 * i + 2]) << 16) |
+                        (static_cast<std::uint32_t>(source[4 * i + 3]) << 24);
+                    if (!little_endian())
+                        bits = ((bits & 0x000000ffu) << 24u) |
+                            ((bits & 0x0000ff00u) << 8u) |
+                            ((bits & 0x00ff0000u) >> 8u) |
+                            ((bits & 0xff000000u) >> 24u);
+                    std::memcpy(&value, &bits, sizeof(value));
+                }
+                if (keep_fp32) {
+                    converted[i] = value;
+                } else {
+                    std::uint32_t bits;
+                    std::memcpy(&bits, &value, sizeof(bits));
+                    static_cast<std::uint16_t*>(converted.raw_data())[i] =
+                        static_cast<std::uint16_t>(bits >> 16u);
+                }
             }
-            if (keep_fp32) {
-                converted[i] = value;
-            } else {
-                std::uint32_t bits;
-                std::memcpy(&bits, &value, sizeof(bits));
-                static_cast<std::uint16_t*>(converted.raw_data())[i] =
-                    static_cast<std::uint16_t>(bits >> 16u);
-            }
-        }
+        });
         result.emplace(e.name, std::move(converted));
     }
     return result;

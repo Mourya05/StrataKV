@@ -470,6 +470,28 @@ __global__ void gemm_bf16_weight_kernel(const Activation* __restrict__ A,
     if (row < M && col + 1 < N) C[row * N + col + 1] = acc1;
 }
 
+template <typename Activation>
+__global__ void gemv_bf16_weight_kernel(const Activation* __restrict__ A,
+                                        const __nv_bfloat16* __restrict__ B,
+                                        float* __restrict__ C, int N, int K)
+{
+    extern __shared__ float input[];
+    const int thread = static_cast<int>(threadIdx.x);
+    for (int k = thread; k < K; k += static_cast<int>(blockDim.x))
+        input[k] = activation_to_float(A[k]);
+    __syncthreads();
+
+    const int col = static_cast<int>(blockIdx.x) *
+        static_cast<int>(blockDim.x) + thread;
+    if (col >= N)
+        return;
+
+    float sum = 0.0f;
+    for (int k = 0; k < K; ++k)
+        sum += input[k] * __bfloat162float(B[k * N + col]);
+    C[col] = sum;
+}
+
 // ---------------------------------------------------------------------------
 //  matmul_cuda_tiled  --  Host wrapper
 //
@@ -538,7 +560,24 @@ void matmul_cuda_tiled(const Tensor& A, const Tensor& B, Tensor& C)
         (static_cast<unsigned>(M) + TILE - 1) / TILE
     );
 
-    if (bf16_inputs) {
+    if (bf16_inputs && M == 1) {
+        const int threads = 256;
+        const dim3 gemv_grid(
+            (static_cast<unsigned>(N) + threads - 1) / threads);
+        if (A.dtype() == DataType::BF16) {
+            gemv_bf16_weight_kernel<__nv_bfloat16>
+                <<<gemv_grid, threads, static_cast<std::size_t>(K) * sizeof(float)>>>(
+                    static_cast<const __nv_bfloat16*>(A.raw_data()),
+                    static_cast<const __nv_bfloat16*>(B.raw_data()),
+                    static_cast<float*>(C.raw_data()), N, K);
+        } else {
+            gemv_bf16_weight_kernel<float>
+                <<<gemv_grid, threads, static_cast<std::size_t>(K) * sizeof(float)>>>(
+                    static_cast<const float*>(A.raw_data()),
+                    static_cast<const __nv_bfloat16*>(B.raw_data()),
+                    static_cast<float*>(C.raw_data()), N, K);
+        }
+    } else if (bf16_inputs) {
         const dim3 bf16_block(TILE / 2, TILE);
         const dim3 bf16_grid(
             (static_cast<unsigned>(N) + TILE - 1) / TILE,
