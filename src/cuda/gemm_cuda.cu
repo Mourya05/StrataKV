@@ -22,6 +22,7 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <cmath>
+#include <cfloat>
 #include <cstdint>
 #include <stdexcept>
 #include <cstring>     // memcmp
@@ -195,6 +196,140 @@ __global__ void rope_split_half_kernel(float* __restrict__ tensor,
         const float sin_val = sin_ptr[index];
         tensor[first] = x1 * cos_val - x2 * sin_val;
         tensor[second] = x2 * cos_val + x1 * sin_val;
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  paged_attention_decode_kernel
+//
+//  One block handles one query head. Each tile computes its logits once,
+//  performs shared-memory max/sum reductions, and merges the tile into the
+//  running online softmax while accumulating values.
+// ---------------------------------------------------------------------------
+__global__ void paged_attention_decode_kernel(
+    const float* __restrict__ query,
+    const float* __restrict__ key_cache,
+    const float* __restrict__ value_cache,
+    const int* __restrict__ block_table,
+    float* __restrict__ output,
+    int context_len, int block_size, int num_q_heads, int num_kv_heads,
+    int head_dim, float scale)
+{
+    __shared__ float logits[ELEMENTWISE_THREADS];
+    __shared__ float reduction[ELEMENTWISE_THREADS];
+    __shared__ float running_max;
+    __shared__ float running_sum;
+    __shared__ float tile_max;
+    __shared__ float tile_sum;
+    __shared__ float old_scale;
+    __shared__ float tile_scale;
+
+    const unsigned int thread = threadIdx.x;
+    const int q_head = static_cast<int>(blockIdx.x);
+    const int q_per_kv = num_q_heads / num_kv_heads;
+    const int kv_head = q_head / q_per_kv;
+    const float* q_head_ptr = query +
+        static_cast<size_t>(q_head) * static_cast<size_t>(head_dim);
+
+    float* output_head = output +
+        static_cast<size_t>(q_head) * static_cast<size_t>(head_dim);
+    for (int dim = static_cast<int>(thread); dim < head_dim;
+         dim += ELEMENTWISE_THREADS)
+        output_head[dim] = 0.0f;
+
+    if (thread == 0) {
+        running_max = -FLT_MAX;
+        running_sum = 0.0f;
+    }
+    __syncthreads();
+
+    for (int tile_start = 0; tile_start < context_len;
+         tile_start += ELEMENTWISE_THREADS) {
+        const int token = tile_start + static_cast<int>(thread);
+        if (token < context_len) {
+            const int logical_block = token / block_size;
+            const int block_offset = token % block_size;
+            const int physical_block = block_table[logical_block];
+            const size_t token_stride = static_cast<size_t>(num_kv_heads) *
+                static_cast<size_t>(head_dim);
+            const size_t cache_offset =
+                (static_cast<size_t>(physical_block) *
+                     static_cast<size_t>(block_size) +
+                 static_cast<size_t>(block_offset)) * token_stride +
+                static_cast<size_t>(kv_head) * static_cast<size_t>(head_dim);
+            const float* key = key_cache + cache_offset;
+            float logit = 0.0f;
+            for (int dim = 0; dim < head_dim; ++dim)
+                logit += q_head_ptr[dim] * key[dim];
+            logits[thread] = logit * scale;
+        } else {
+            logits[thread] = -FLT_MAX;
+        }
+
+        reduction[thread] = logits[thread];
+        __syncthreads();
+        for (unsigned int stride = ELEMENTWISE_THREADS / 2; stride > 0;
+             stride >>= 1) {
+            if (thread < stride)
+                reduction[thread] = fmaxf(reduction[thread],
+                                          reduction[thread + stride]);
+            __syncthreads();
+        }
+        if (thread == 0)
+            tile_max = reduction[0];
+        __syncthreads();
+
+        reduction[thread] = token < context_len
+            ? expf(logits[thread] - tile_max) : 0.0f;
+        __syncthreads();
+        for (unsigned int stride = ELEMENTWISE_THREADS / 2; stride > 0;
+             stride >>= 1) {
+            if (thread < stride)
+                reduction[thread] += reduction[thread + stride];
+            __syncthreads();
+        }
+        if (thread == 0) {
+            tile_sum = reduction[0];
+            const float new_max = fmaxf(running_max, tile_max);
+            old_scale = expf(running_max - new_max);
+            tile_scale = expf(tile_max - new_max);
+            running_sum = running_sum * old_scale + tile_sum * tile_scale;
+            running_max = new_max;
+        }
+        __syncthreads();
+
+        for (int dim = static_cast<int>(thread); dim < head_dim;
+             dim += ELEMENTWISE_THREADS) {
+            float value_sum = output_head[dim] * old_scale;
+            for (int tile_token = 0; tile_token < ELEMENTWISE_THREADS;
+                 ++tile_token) {
+                const int value_token = tile_start + tile_token;
+                if (value_token >= context_len)
+                    break;
+                const int logical_block = value_token / block_size;
+                const int block_offset = value_token % block_size;
+                const int physical_block = block_table[logical_block];
+                const size_t token_stride = static_cast<size_t>(num_kv_heads) *
+                    static_cast<size_t>(head_dim);
+                const size_t cache_offset =
+                    (static_cast<size_t>(physical_block) *
+                         static_cast<size_t>(block_size) +
+                     static_cast<size_t>(block_offset)) * token_stride +
+                    static_cast<size_t>(kv_head) *
+                        static_cast<size_t>(head_dim);
+                const float* value = value_cache + cache_offset;
+                value_sum += expf(logits[tile_token] - tile_max) *
+                    tile_scale * value[dim];
+            }
+            output_head[dim] = value_sum;
+        }
+        __syncthreads();
+    }
+
+    const float inverse_sum = 1.0f / running_sum;
+    for (int dim = static_cast<int>(thread); dim < head_dim;
+         dim += ELEMENTWISE_THREADS) {
+        output_head[dim] *= inverse_sum;
     }
 }
 
@@ -438,6 +573,28 @@ void rope_split_half_cuda(float* tensor, const float* cos_ptr,
     rope_split_half_kernel<<<static_cast<unsigned>(num_heads),
                              ELEMENTWISE_THREADS>>>(
         tensor, cos_ptr, sin_ptr, head_dim);
+    CUDA_CHECK_KERNEL();
+}
+
+void paged_attention_decode_cuda(
+    const float* query, const float* key_cache, const float* value_cache,
+    const int* block_table, float* output, int context_len, int block_size,
+    int num_q_heads, int num_kv_heads, int head_dim, float scale)
+{
+    if (query == nullptr || key_cache == nullptr || value_cache == nullptr ||
+        block_table == nullptr || output == nullptr || context_len <= 0 ||
+        block_size <= 0 || num_q_heads <= 0 || num_kv_heads <= 0 ||
+        head_dim <= 0 || num_q_heads % num_kv_heads != 0 ||
+        !(scale > 0.0f) || !std::isfinite(scale)) {
+        throw std::invalid_argument(
+            "paged_attention_decode_cuda: invalid device pointers or "
+            "attention dimensions");
+    }
+
+    paged_attention_decode_kernel<<<static_cast<unsigned>(num_q_heads),
+                                    ELEMENTWISE_THREADS>>>(
+        query, key_cache, value_cache, block_table, output, context_len,
+        block_size, num_q_heads, num_kv_heads, head_dim, scale);
     CUDA_CHECK_KERNEL();
 }
 

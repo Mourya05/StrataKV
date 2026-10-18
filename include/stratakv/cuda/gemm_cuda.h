@@ -23,6 +23,12 @@ void swiglu_cuda(float* tensor, int hidden_size);
 // Apply split-half RoPE in place to contiguous FP32 head vectors.
 void rope_split_half_cuda(float* tensor, const float* cos_ptr,
                           const float* sin_ptr, int num_heads, int head_dim);
+
+// Decode one token against paged FP32 KV caches with grouped-query attention.
+void paged_attention_decode_cuda(
+    const float* query, const float* key_cache, const float* value_cache,
+    const int* block_table, float* output, int context_len, int block_size,
+    int num_q_heads, int num_kv_heads, int head_dim, float scale);
 #endif
 
 } // namespace stratakv
