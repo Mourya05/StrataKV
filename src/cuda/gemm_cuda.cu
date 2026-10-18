@@ -21,6 +21,7 @@
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
+#include <cmath>
 #include <cstdint>
 #include <stdexcept>
 #include <cstring>     // memcmp
@@ -32,6 +33,7 @@ namespace stratakv {
 //  Kernel constants
 // ---------------------------------------------------------------------------
 static constexpr int TILE = 32;   // thread-block edge length
+static constexpr int ELEMENTWISE_THREADS = 256;
 
 // ---------------------------------------------------------------------------
 //  gemm_tiled_kernel
@@ -112,6 +114,61 @@ __global__ void add_bias_kernel(float* __restrict__ output,
     const int total = rows * columns;
     if (index < total)
         output[index] += bias[index % columns];
+}
+
+// ---------------------------------------------------------------------------
+//  rmsnorm_kernel
+//
+//  One block handles one hidden vector. Threads cooperatively reduce the
+//  vector's sum of squares, then normalize and scale each element.
+// ---------------------------------------------------------------------------
+__global__ void rmsnorm_kernel(const float* __restrict__ input,
+                               float* __restrict__ output,
+                               const float* __restrict__ weight,
+                               int hidden_size, float epsilon)
+{
+    __shared__ float sum_squares[ELEMENTWISE_THREADS];
+    const unsigned int thread = threadIdx.x;
+
+    float local_sum = 0.0f;
+    for (int index = static_cast<int>(thread); index < hidden_size;
+         index += ELEMENTWISE_THREADS) {
+        const float value = input[index];
+        local_sum += value * value;
+    }
+    sum_squares[thread] = local_sum;
+    __syncthreads();
+
+    for (unsigned int stride = ELEMENTWISE_THREADS / 2; stride > 0;
+         stride >>= 1) {
+        if (thread < stride)
+            sum_squares[thread] += sum_squares[thread + stride];
+        __syncthreads();
+    }
+
+    const float inverse_rms =
+        rsqrtf(sum_squares[0] / static_cast<float>(hidden_size) + epsilon);
+    for (int index = static_cast<int>(thread); index < hidden_size;
+         index += ELEMENTWISE_THREADS) {
+        output[index] = input[index] * inverse_rms * weight[index];
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  swiglu_kernel
+//
+//  The first half contains the gate projection and the second half contains
+//  the up projection. The result is written into the first half.
+// ---------------------------------------------------------------------------
+__global__ void swiglu_kernel(float* __restrict__ tensor, int hidden_size)
+{
+    const int index = static_cast<int>(blockIdx.x) *
+            ELEMENTWISE_THREADS + static_cast<int>(threadIdx.x);
+    if (index < hidden_size) {
+        const float gate = tensor[index];
+        const float up = tensor[hidden_size + index];
+        tensor[index] = (gate / (1.0f + expf(-gate))) * up;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +369,33 @@ void add_bias_cuda(Tensor& output, const Tensor& bias)
     add_bias_kernel<<<(static_cast<unsigned>(total) + 255u) / 256u, 256>>>(
         static_cast<float*>(output.raw_data()),
         static_cast<const float*>(bias.raw_data()), rows, columns);
+    CUDA_CHECK_KERNEL();
+}
+
+void rmsnorm_cuda(const float* input, float* output, const float* weight,
+                  int hidden_size, float epsilon)
+{
+    if (input == nullptr || output == nullptr || weight == nullptr ||
+        hidden_size <= 0 || !(epsilon > 0.0f) || !std::isfinite(epsilon)) {
+        throw std::invalid_argument(
+            "rmsnorm_cuda: expected non-null device pointers, positive "
+            "hidden_size, and positive epsilon");
+    }
+    rmsnorm_kernel<<<1, ELEMENTWISE_THREADS>>>(
+        input, output, weight, hidden_size, epsilon);
+    CUDA_CHECK_KERNEL();
+}
+
+void swiglu_cuda(float* tensor, int hidden_size)
+{
+    if (tensor == nullptr || hidden_size <= 0) {
+        throw std::invalid_argument(
+            "swiglu_cuda: expected a non-null device pointer and positive "
+            "hidden_size");
+    }
+    swiglu_kernel<<<(static_cast<unsigned>(hidden_size) +
+                     ELEMENTWISE_THREADS - 1) / ELEMENTWISE_THREADS,
+                    ELEMENTWISE_THREADS>>>(tensor, hidden_size);
     CUDA_CHECK_KERNEL();
 }
 
