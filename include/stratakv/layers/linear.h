@@ -29,6 +29,7 @@ public:
     ~Linear() = default;
 
     Tensor forward(const Tensor& input) const;
+    void forward_into(const Tensor& input, Tensor& output) const;
 
     void to(Device device);
 

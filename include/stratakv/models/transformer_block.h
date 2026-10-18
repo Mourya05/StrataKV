@@ -5,6 +5,7 @@
 #include "stratakv/layers/rmsnorm.h"
 
 #include <cstddef>
+#include <optional>
 
 namespace stratakv {
 namespace models {
@@ -43,6 +44,10 @@ public:
                    memory::PageTable& page_table,
                    memory::BlockPool& block_pool,
                    bool append_tokens = true);
+    void forward_into(const Tensor& hidden_states, Tensor& output,
+                      int seq_id, memory::PageTable& page_table,
+                      memory::BlockPool& block_pool,
+                      bool append_tokens = true);
 
     std::size_t last_attention_blocks_visited() const noexcept {
         return attention_.last_blocks_visited();
@@ -78,6 +83,19 @@ private:
     layers::Linear up_proj_;
     layers::Linear down_proj_;
     bool parity_diagnostic_ = false;
+#if defined(STRATAKV_HAS_CUDA)
+    std::optional<Tensor> normalized_input_workspace_;
+    std::optional<Tensor> query_workspace_;
+    std::optional<Tensor> key_workspace_;
+    std::optional<Tensor> value_workspace_;
+    std::optional<Tensor> cos_workspace_;
+    std::optional<Tensor> sin_workspace_;
+    std::optional<Tensor> context_workspace_;
+    std::optional<Tensor> normalized_residual_workspace_;
+    std::optional<Tensor> gate_workspace_;
+    std::optional<Tensor> up_workspace_;
+    std::optional<Tensor> down_workspace_;
+#endif
 };
 
 } // namespace models

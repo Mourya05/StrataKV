@@ -104,6 +104,20 @@ Tensor Linear::forward(const Tensor& input) const {
     }
     Tensor output({input.shape()[0], output_dim_}, DataType::FP32,
                   input.device());
+    forward_into(input, output);
+    return output;
+}
+
+void Linear::forward_into(const Tensor& input, Tensor& output) const {
+    if (input.ndim() != 2 || input.shape()[1] != input_dim_ ||
+        output.ndim() != 2 ||
+        output.shape() != std::vector<std::size_t>{
+            input.shape()[0], output_dim_} ||
+        output.dtype() != DataType::FP32 ||
+        output.device() != input.device()) {
+        throw std::invalid_argument(
+            "Linear::forward_into: input/output shape or device mismatch");
+    }
 
 #if defined(STRATAKV_HAS_CUDA)
     if (input.device() == Device::GPU)
@@ -125,7 +139,7 @@ Tensor Linear::forward(const Tensor& input) const {
                 throw std::invalid_argument(
                     "Linear::forward: GPU bias must be GPU-resident");
             add_bias_cuda(output, *bias_);
-            return output;
+            return;
         }
 #else
         if (output.device() == Device::GPU)
@@ -143,7 +157,6 @@ Tensor Linear::forward(const Tensor& input) const {
         }
     }
 
-    return output;
 }
 
 } // namespace layers

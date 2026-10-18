@@ -224,6 +224,50 @@ void TransformerBlock::to(Device device) {
     gate_proj_.to(device);
     up_proj_.to(device);
     down_proj_.to(device);
+#if defined(STRATAKV_HAS_CUDA)
+    if (device == Device::GPU) {
+        const std::size_t kv_dim =
+            attention_.num_kv_heads() * attention_.head_dim();
+        normalized_input_workspace_.emplace(
+            std::vector<std::size_t>{1, hidden_dim_}, DataType::FP32, device);
+        query_workspace_.emplace(
+            std::vector<std::size_t>{1, hidden_dim_}, DataType::FP32, device);
+        key_workspace_.emplace(
+            std::vector<std::size_t>{1, kv_dim}, DataType::FP32, device);
+        value_workspace_.emplace(
+            std::vector<std::size_t>{1, kv_dim}, DataType::FP32, device);
+        cos_workspace_.emplace(
+            std::vector<std::size_t>{attention_.head_dim() / 2},
+            DataType::FP32, device);
+        sin_workspace_.emplace(
+            std::vector<std::size_t>{attention_.head_dim() / 2},
+            DataType::FP32, device);
+        context_workspace_.emplace(
+            std::vector<std::size_t>{1, hidden_dim_}, DataType::FP32, device);
+        normalized_residual_workspace_.emplace(
+            std::vector<std::size_t>{1, hidden_dim_}, DataType::FP32, device);
+        gate_workspace_.emplace(
+            std::vector<std::size_t>{1, gate_proj_.output_dim()},
+            DataType::FP32, device);
+        up_workspace_.emplace(
+            std::vector<std::size_t>{1, up_proj_.output_dim()},
+            DataType::FP32, device);
+        down_workspace_.emplace(
+            std::vector<std::size_t>{1, hidden_dim_}, DataType::FP32, device);
+    } else {
+        normalized_input_workspace_.reset();
+        query_workspace_.reset();
+        key_workspace_.reset();
+        value_workspace_.reset();
+        cos_workspace_.reset();
+        sin_workspace_.reset();
+        context_workspace_.reset();
+        normalized_residual_workspace_.reset();
+        gate_workspace_.reset();
+        up_workspace_.reset();
+        down_workspace_.reset();
+    }
+#endif
 }
 
 Tensor TransformerBlock::forward(const Tensor& hidden_states,
@@ -298,8 +342,22 @@ Tensor TransformerBlock::forward(const Tensor& hidden_states,
             parity_norm1 = cpu_rmsnorm(
                 parity_input, host_values(norm1_.gamma()), norm1_.epsilon());
 
-        Tensor normalized_input({1, hidden_dim_}, DataType::FP32,
-                                Device::GPU);
+        if (!normalized_input_workspace_ || !query_workspace_ ||
+            !key_workspace_ || !value_workspace_ || !cos_workspace_ ||
+            !sin_workspace_ || !context_workspace_ ||
+            !normalized_residual_workspace_ || !gate_workspace_ ||
+            !up_workspace_ || !down_workspace_)
+            throw std::runtime_error(
+                "TransformerBlock::forward: GPU workspace is not initialized");
+        Tensor& normalized_input = *normalized_input_workspace_;
+        Tensor& queries = *query_workspace_;
+        Tensor& keys = *key_workspace_;
+        Tensor& values = *value_workspace_;
+        Tensor& context = *context_workspace_;
+        Tensor& normalized_residual = *normalized_residual_workspace_;
+        Tensor& gate = *gate_workspace_;
+        Tensor& up = *up_workspace_;
+        Tensor& down = *down_workspace_;
         rmsnorm_cuda(
             static_cast<const float*>(hidden_states.raw_data()),
             static_cast<float*>(normalized_input.raw_data()),
@@ -309,9 +367,9 @@ Tensor TransformerBlock::forward(const Tensor& hidden_states,
             parity_report("rmsnorm_norm1", host_values(normalized_input),
                           parity_norm1);
 
-        Tensor queries = attention_.query_projection().forward(normalized_input);
-        Tensor keys = attention_.key_projection().forward(normalized_input);
-        Tensor values = attention_.value_projection().forward(normalized_input);
+        attention_.query_projection().forward_into(normalized_input, queries);
+        attention_.key_projection().forward_into(normalized_input, keys);
+        attention_.value_projection().forward_into(normalized_input, values);
         std::vector<float> parity_query, parity_key, parity_value;
         if (parity) {
             parity_query = cpu_matmul(parity_norm1, hidden_dim_,
@@ -325,27 +383,23 @@ Tensor TransformerBlock::forward(const Tensor& hidden_states,
             parity_report("v_proj", host_values(values), parity_value);
         }
 
-        Tensor cos_values({static_cast<std::size_t>(head_dim / 2)},
-                          DataType::FP32, Device::GPU);
-        Tensor sin_values({static_cast<std::size_t>(head_dim / 2)},
-                          DataType::FP32, Device::GPU);
         generate_rope_frequencies_cuda(
-            static_cast<float*>(cos_values.raw_data()),
-            static_cast<float*>(sin_values.raw_data()), head_dim / 2,
+            static_cast<float*>(cos_workspace_->raw_data()),
+            static_cast<float*>(sin_workspace_->raw_data()), head_dim / 2,
             position, head_dim);
         const std::vector<float> parity_cos =
-            parity ? host_values(cos_values) : std::vector<float>();
+            parity ? host_values(*cos_workspace_) : std::vector<float>();
         const std::vector<float> parity_sin =
-            parity ? host_values(sin_values) : std::vector<float>();
+            parity ? host_values(*sin_workspace_) : std::vector<float>();
         rope_split_half_cuda(
             static_cast<float*>(queries.raw_data()),
-            static_cast<const float*>(cos_values.raw_data()),
-            static_cast<const float*>(sin_values.raw_data()), num_heads,
+            static_cast<const float*>(cos_workspace_->raw_data()),
+            static_cast<const float*>(sin_workspace_->raw_data()), num_heads,
             head_dim);
         rope_split_half_cuda(
             static_cast<float*>(keys.raw_data()),
-            static_cast<const float*>(cos_values.raw_data()),
-            static_cast<const float*>(sin_values.raw_data()), num_kv_heads,
+            static_cast<const float*>(cos_workspace_->raw_data()),
+            static_cast<const float*>(sin_workspace_->raw_data()), num_kv_heads,
             head_dim);
         if (parity) {
             cpu_rope_split(parity_query, parity_cos, parity_sin, num_heads,
@@ -387,7 +441,6 @@ Tensor TransformerBlock::forward(const Tensor& hidden_states,
 
         const int* device_block_table =
             page_table.get_device_block_table(seq_id);
-        Tensor context({1, hidden_dim_}, DataType::FP32, Device::GPU);
         paged_attention_decode_cuda(
             static_cast<const float*>(queries.raw_data()),
             block_pool.key_cache(), block_pool.value_cache(),
@@ -403,27 +456,21 @@ Tensor TransformerBlock::forward(const Tensor& hidden_states,
                           parity_context);
         }
 
-        Tensor attention_output =
-            attention_.output_projection().forward(context);
+        attention_.output_projection().forward_into(context, down);
         std::vector<float> parity_out_proj;
         if (parity) {
             parity_out_proj = cpu_matmul(
                 parity_context, hidden_dim_,
                 attention_.output_projection().weight());
-            parity_report("out_proj", host_values(attention_output),
+            parity_report("out_proj", host_values(down),
                           parity_out_proj);
         }
-        Tensor residual({1, hidden_dim_}, DataType::FP32, Device::GPU);
-        copy_device(hidden_states.raw_data(), residual.raw_data(),
-                    hidden_dim_ * sizeof(float), "attention residual copy");
-        add_inplace_cuda(static_cast<float*>(residual.raw_data()),
-                         static_cast<const float*>(attention_output.raw_data()),
+        add_inplace_cuda(static_cast<float*>(down.raw_data()),
+                         static_cast<const float*>(hidden_states.raw_data()),
                          static_cast<int>(hidden_dim_));
 
-        Tensor normalized_residual({1, hidden_dim_}, DataType::FP32,
-                                   Device::GPU);
         rmsnorm_cuda(
-            static_cast<const float*>(residual.raw_data()),
+            static_cast<const float*>(down.raw_data()),
             static_cast<float*>(normalized_residual.raw_data()),
             static_cast<const float*>(norm2_.gamma().raw_data()),
             static_cast<int>(hidden_dim_), norm2_.epsilon());
@@ -439,8 +486,8 @@ Tensor TransformerBlock::forward(const Tensor& hidden_states,
                           parity_norm2);
         }
 
-        Tensor gate = gate_proj_.forward(normalized_residual);
-        Tensor up = up_proj_.forward(normalized_residual);
+        gate_proj_.forward_into(normalized_residual, gate);
+        up_proj_.forward_into(normalized_residual, up);
         std::vector<float> parity_gate, parity_up;
         if (parity) {
             parity_gate = cpu_matmul(
@@ -451,44 +498,33 @@ Tensor TransformerBlock::forward(const Tensor& hidden_states,
             parity_report("up_proj", host_values(up), parity_up);
         }
         const int intermediate_dim = static_cast<int>(gate_proj_.output_dim());
-        Tensor merged({1, static_cast<std::size_t>(intermediate_dim) * 2u},
-                      DataType::FP32, Device::GPU);
-        copy_device(gate.raw_data(), merged.raw_data(),
-                    static_cast<std::size_t>(intermediate_dim) * sizeof(float),
-                    "gate projection pack");
-        copy_device(
-            up.raw_data(),
-            static_cast<float*>(merged.raw_data()) + intermediate_dim,
-            static_cast<std::size_t>(intermediate_dim) * sizeof(float),
-            "up projection pack");
-        swiglu_cuda(static_cast<float*>(merged.raw_data()), intermediate_dim);
+        swiglu_inplace_cuda(static_cast<float*>(gate.raw_data()),
+                            static_cast<const float*>(up.raw_data()),
+                            intermediate_dim);
         std::vector<float> parity_ffn_input;
         if (parity) {
             parity_ffn_input = parity_gate;
             parity_ffn_input.insert(parity_ffn_input.end(),
                                     parity_up.begin(), parity_up.end());
             cpu_swiglu(parity_ffn_input, intermediate_dim);
-            parity_report("swiglu", host_values(merged), parity_ffn_input);
+            parity_report("swiglu", host_values(gate), parity_ffn_input);
         }
-
-        Tensor ffn_input({1, static_cast<std::size_t>(intermediate_dim)},
-                         DataType::FP32, Device::GPU);
-        copy_device(merged.raw_data(), ffn_input.raw_data(),
-                    static_cast<std::size_t>(intermediate_dim) * sizeof(float),
-                    "SwiGLU output unpack");
-        Tensor ffn_output = down_proj_.forward(ffn_input);
+        down_proj_.forward_into(gate, context);
         std::vector<float> parity_down;
         if (parity) {
             parity_down = cpu_matmul(
                 parity_ffn_input, static_cast<std::size_t>(intermediate_dim),
                 down_proj_.weight());
-            parity_report("down_proj", host_values(ffn_output), parity_down);
+            parity_report("down_proj", host_values(context), parity_down);
             parity_diagnostic_ = false;
         }
-        add_inplace_cuda(static_cast<float*>(residual.raw_data()),
-                         static_cast<const float*>(ffn_output.raw_data()),
+        add_inplace_cuda(static_cast<float*>(down.raw_data()),
+                         static_cast<const float*>(context.raw_data()),
                          static_cast<int>(hidden_dim_));
-        return residual;
+        Tensor result({1, hidden_dim_}, DataType::FP32, Device::GPU);
+        copy_device(down.raw_data(), result.raw_data(),
+                    hidden_dim_ * sizeof(float), "transformer output");
+        return result;
     }
 #else
     if (hidden_states.device() == Device::GPU) {
@@ -528,6 +564,33 @@ Tensor TransformerBlock::forward(const Tensor& hidden_states,
     }
 
     return output;
+}
+
+void TransformerBlock::forward_into(
+    const Tensor& hidden_states, Tensor& output, int seq_id,
+    memory::PageTable& page_table, memory::BlockPool& block_pool,
+    bool append_tokens) {
+    if (output.device() != hidden_states.device() ||
+        output.shape() != hidden_states.shape() ||
+        output.dtype() != DataType::FP32) {
+        throw std::invalid_argument(
+            "TransformerBlock::forward_into: output shape or device mismatch");
+    }
+    Tensor computed = forward(hidden_states, seq_id, page_table, block_pool,
+                              append_tokens);
+    if (output.device() == Device::GPU) {
+#if defined(STRATAKV_HAS_CUDA)
+        copy_device(computed.raw_data(), output.raw_data(),
+                    computed.num_elements() * sizeof(float),
+                    "transformer output");
+#else
+        throw std::runtime_error(
+            "TransformerBlock::forward_into: GPU requires CUDA support");
+#endif
+    } else {
+        for (std::size_t i = 0; i < output.num_elements(); ++i)
+            output[i] = computed[i];
+    }
 }
 
 } // namespace models

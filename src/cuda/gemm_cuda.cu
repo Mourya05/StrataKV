@@ -172,6 +172,18 @@ __global__ void swiglu_kernel(float* __restrict__ tensor, int hidden_size)
     }
 }
 
+__global__ void swiglu_inplace_kernel(float* __restrict__ gate,
+                                      const float* __restrict__ up,
+                                      int intermediate_dim)
+{
+    const int index = static_cast<int>(blockIdx.x) *
+            ELEMENTWISE_THREADS + static_cast<int>(threadIdx.x);
+    if (index < intermediate_dim) {
+        const float value = gate[index];
+        gate[index] = (value / (1.0f + expf(-value))) * up[index];
+    }
+}
+
 // ---------------------------------------------------------------------------
 //  rope_split_half_kernel
 //
@@ -592,9 +604,22 @@ void swiglu_cuda(float* tensor, int hidden_size)
             "swiglu_cuda: expected a non-null device pointer and positive "
             "hidden_size");
     }
+
     swiglu_kernel<<<(static_cast<unsigned>(hidden_size) +
                      ELEMENTWISE_THREADS - 1) / ELEMENTWISE_THREADS,
                     ELEMENTWISE_THREADS>>>(tensor, hidden_size);
+    CUDA_CHECK_KERNEL();
+}
+
+void swiglu_inplace_cuda(float* gate, const float* up, int intermediate_dim)
+{
+    if (gate == nullptr || up == nullptr || intermediate_dim <= 0)
+        throw std::invalid_argument(
+            "swiglu_inplace_cuda: invalid device pointer or dimension");
+    swiglu_inplace_kernel<<<
+        (static_cast<unsigned>(intermediate_dim) + ELEMENTWISE_THREADS - 1) /
+            ELEMENTWISE_THREADS,
+        ELEMENTWISE_THREADS>>>(gate, up, intermediate_dim);
     CUDA_CHECK_KERNEL();
 }
 

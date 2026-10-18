@@ -470,8 +470,15 @@ Tensor Generator::forward(const Tensor& input) {
         gpu_layer_values.reserve(blocks_.size());
 #endif
     for (std::size_t layer = 0; layer < blocks_.size(); ++layer) {
-        output = blocks_[layer].forward(
-            output, 0, pages_[layer], pools_[layer], true);
+        if (device_ == Device::GPU) {
+#if defined(STRATAKV_HAS_CUDA)
+            blocks_[layer].forward_into(
+                output, output, 0, pages_[layer], pools_[layer], true);
+#endif
+        } else {
+            output = blocks_[layer].forward(
+                output, 0, pages_[layer], pools_[layer], true);
+        }
 #if defined(STRATAKV_HAS_CUDA)
         if (!parity_blocks_.empty())
             gpu_layer_values.push_back(parity_host_values(output));
@@ -524,6 +531,15 @@ std::vector<int> Generator::generate(const std::vector<int>& prompt,
     SequenceGuard guard(pages_, pools_); // Armed before sequence allocation.
     for (std::size_t layer = 0; layer < blocks_.size(); ++layer)
         pages_[layer].allocate_sequence(0, pools_[layer]);
+#if defined(STRATAKV_HAS_CUDA)
+    if (std::getenv("STRATAKV_PARITY") != nullptr) {
+        for (std::size_t layer = 0; layer < parity_pages_.size(); ++layer) {
+            if (!parity_pages_[layer].has_sequence(0))
+                parity_pages_[layer].allocate_sequence(
+                    0, parity_pools_[layer]);
+        }
+    }
+#endif
     Tensor last({1, config_.hidden_dim}, DataType::FP32, device_);
     if (device_ == Device::GPU) {
 #if defined(STRATAKV_HAS_CUDA)
