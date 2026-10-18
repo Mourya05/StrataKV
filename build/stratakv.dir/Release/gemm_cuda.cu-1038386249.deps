@@ -106,7 +106,11 @@ C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\crt\math_functi
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\crt\sm_70_rt.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\crt\sm_80_rt.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\crt\sm_90_rt.h
+C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\cuda_bf16.h
+C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\cuda_bf16.hpp
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\cuda_device_runtime_api.h
+C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\cuda_fp16.h
+C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\cuda_fp16.hpp
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\cuda_runtime.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\cuda_runtime_api.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\device_atomic_functions.h
@@ -115,6 +119,9 @@ C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\device_types.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\driver_functions.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\driver_types.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\library_types.h
+C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\nv\detail\__preprocessor
+C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\nv\detail\__target_macros
+C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\nv\target
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\sm_20_atomic_functions.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\sm_20_intrinsics.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\sm_30_intrinsics.h
@@ -131,6 +138,7 @@ C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\texture_types.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\vector_functions.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\vector_functions.hpp
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\vector_types.h
+E:\My Folder\Mourya folder\Projects\StrataKV\include\stratakv\cuda\gemm_cuda.h
 E:\My Folder\Mourya folder\Projects\StrataKV\include\stratakv\cuda_utils.cuh
 E:\My Folder\Mourya folder\Projects\StrataKV\include\stratakv\ops.h
 E:\My Folder\Mourya folder\Projects\StrataKV\include\stratakv\tensor.h

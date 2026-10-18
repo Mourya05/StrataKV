@@ -16,6 +16,9 @@ struct GeneratorConfig {
     int block_size = 0;
     std::size_t vocab_size = 0;
     int eos_token_id = -1; // Disabled when -1.
+    // Zero keeps existing deterministic generation unless a caller opts into
+    // temperature sampling explicitly.
+    SamplerConfig sampler{0.0f, 0, 1.0f};
 
     // Keep the Phase 5 positional form source-compatible as a one-layer
     // configuration while allowing the full Phase 6 form below.

@@ -327,10 +327,14 @@ std::vector<Entry> Parser::parse() {
 }
 
 void validate_entries(std::vector<Entry>& entries, std::size_t payload_bytes) {
-    const auto limit = static_cast<std::size_t>(
-        (std::numeric_limits<std::ptrdiff_t>::max)()) / sizeof(float);
     for (auto& e : entries) {
-        if (e.dtype != "F32" && e.dtype != "BF16") fail("unsupported dtype: " + e.dtype);
+        if (e.dtype != "F32" && e.dtype != "BF16" &&
+            e.dtype != "bfloat16")
+            fail("unsupported dtype: " + e.dtype);
+        const auto element_size =
+            e.dtype == "F32" ? sizeof(float) : sizeof(std::uint16_t);
+        const auto limit = static_cast<std::size_t>(
+            (std::numeric_limits<std::ptrdiff_t>::max)()) / element_size;
         // Work backwards to validate representable row-major strides too.
         std::size_t count = 1;
         for (std::size_t i = e.shape.size(); i-- > 0;) {
@@ -377,28 +381,46 @@ WeightMap load_safetensors(const std::filesystem::path& path,
     result.reserve(entries.size());
     for (const auto& e : entries) {
         unsigned char* source = mapped->data + data_start + e.begin;
-        const bool alias = e.dtype == "F32" && e.count != 0 && little_endian() &&
-            reinterpret_cast<std::uintptr_t>(source) % 64u == 0;
+        const bool is_bf16 = e.dtype == "BF16" || e.dtype == "bfloat16";
+        const bool alias = e.count != 0 && little_endian() &&
+            ((e.dtype == "F32" &&
+              reinterpret_cast<std::uintptr_t>(source) % 64u == 0) ||
+             is_bf16);
         if (require_mapped_f32 && e.dtype == "F32" && e.count != 0 && !alias)
             fail("F32 tensor is not directly mappable: " + e.name);
         if (alias) {
-            result.emplace(e.name, Tensor::from_external(
-                e.shape, reinterpret_cast<float*>(source), mapped));
+            if (e.dtype == "F32") {
+                result.emplace(e.name, Tensor::from_external(
+                    e.shape, reinterpret_cast<float*>(source), mapped));
+            } else {
+                result.emplace(e.name, Tensor::from_external_bytes(
+                    e.shape, source, mapped, DataType::BF16));
+            }
             continue;
         }
-        Tensor converted(e.shape);
+        const DataType dtype = e.dtype == "F32"
+            ? DataType::FP32 : DataType::BF16;
+        Tensor converted(e.shape, dtype);
         for (std::size_t i = 0; i < e.count; ++i) {
-            std::uint32_t bits;
-            if (e.dtype == "BF16") {
-                bits = (static_cast<std::uint32_t>(source[2 * i]) |
-                       (static_cast<std::uint32_t>(source[2 * i + 1]) << 8)) << 16;
+            if (is_bf16) {
+                auto* destination = static_cast<unsigned char*>(
+                    converted.raw_data());
+                if (little_endian()) {
+                    destination[2 * i] = source[2 * i];
+                    destination[2 * i + 1] = source[2 * i + 1];
+                } else {
+                    destination[2 * i] = source[2 * i + 1];
+                    destination[2 * i + 1] = source[2 * i];
+                }
             } else {
-                bits = static_cast<std::uint32_t>(source[4 * i]) |
-                      (static_cast<std::uint32_t>(source[4 * i + 1]) << 8) |
-                      (static_cast<std::uint32_t>(source[4 * i + 2]) << 16) |
-                      (static_cast<std::uint32_t>(source[4 * i + 3]) << 24);
+                std::uint32_t bits =
+                    static_cast<std::uint32_t>(source[4 * i]) |
+                    (static_cast<std::uint32_t>(source[4 * i + 1]) << 8) |
+                    (static_cast<std::uint32_t>(source[4 * i + 2]) << 16) |
+                    (static_cast<std::uint32_t>(source[4 * i + 3]) << 24);
+                std::memcpy(static_cast<unsigned char*>(converted.raw_data()) +
+                            i * sizeof(float), &bits, sizeof(bits));
             }
-            std::memcpy(converted.data() + i, &bits, sizeof(bits));
         }
         result.emplace(e.name, std::move(converted));
     }

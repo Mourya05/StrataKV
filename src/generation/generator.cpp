@@ -73,7 +73,7 @@ Tensor take(io::WeightMap& weights, const std::string& key,
         throw std::invalid_argument("Missing weight: " + key);
     const Tensor& source = it->second;
     if (source.shape() != std::vector<std::size_t>(expected) ||
-        source.num_elements() != checked_elements(expected) || !source.data())
+        source.num_elements() != checked_elements(expected) || !source.raw_data())
         throw std::invalid_argument("Wrong shape/storage: " + key);
     for (std::size_t i = 0; i < source.num_elements(); ++i)
         if (!std::isfinite(source[i]))
@@ -87,10 +87,11 @@ void load_linear(io::WeightMap& weights, const std::string& key,
                  layers::Linear& layer) {
     const auto in = layer.input_dim(), out = layer.output_dim();
     Tensor disk = take(weights, key, {out, in});
-    Tensor& dest = layer.weight(); // Transpose into existing allocation once.
+    Tensor dest({in, out}, disk.dtype());
     for (std::size_t o = 0; o < out; ++o)
         for (std::size_t i = 0; i < in; ++i)
             dest[i * out + o] = disk[o * in + i];
+    layer.set_weight(std::move(dest));
     if (Tensor* bias = layer.bias())
         std::fill_n(bias->data(), bias->num_elements(), 0.0f);
 }
@@ -139,6 +140,7 @@ Generator::Generator(GeneratorConfig config, io::WeightMap weights)
     : config_(validate_config(config)),
       blocks_(make_blocks(config_)),
       pool_(config_.total_blocks, config_.block_size),
+      sampler_(config_.sampler),
       embeddings_(take_embedding(weights, config_)),
       final_norm_(take_final_norm(weights, config_)),
       lm_head_(config_.hidden_dim, config_.vocab_size) {
@@ -198,9 +200,10 @@ Generator::Generator(GeneratorConfig config, io::WeightMap weights)
                     attn.output_projection());
         load_linear(weights, "block.ffn.up_proj.weight",
                     block.gate_projection());
-        std::copy_n(block.gate_projection().weight().data(),
-                    block.gate_projection().weight().num_elements(),
-                    block.up_projection().weight().data());
+        for (std::size_t i = 0;
+             i < block.gate_projection().weight().num_elements(); ++i)
+            block.up_projection().weight()[i] =
+                block.gate_projection().weight()[i];
         load_linear(weights, "block.ffn.down_proj.weight",
                     block.down_projection());
     }
@@ -214,8 +217,9 @@ Tensor Generator::embed(const int* ids, std::size_t count) const {
     checked_elements({count, h});
     Tensor input({count, h});
     for (std::size_t row = 0; row < count; ++row)
-        std::copy_n(embeddings_.data() + static_cast<std::size_t>(ids[row]) * h,
-                    h, input.data() + row * h);
+        for (std::size_t col = 0; col < h; ++col)
+            input[row * h + col] = embeddings_[
+                static_cast<std::size_t>(ids[row]) * h + col];
     return input;
 }
 

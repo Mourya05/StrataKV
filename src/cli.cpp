@@ -1,6 +1,9 @@
 #include "stratakv/generation/generator.h"
 
 #include <charconv>
+#include <cerrno>
+#include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
@@ -30,34 +33,99 @@ int parse_int(const char* text, const char* argument_name) {
     return value;
 }
 
+float parse_float(const char* text, const char* argument_name) {
+    if (text == nullptr || *text == '\0') {
+        throw std::invalid_argument(std::string("empty ") + argument_name);
+    }
+    char* parsed_end = nullptr;
+    errno = 0;
+    const float value = std::strtof(text, &parsed_end);
+    if (errno == ERANGE || parsed_end == text || *parsed_end != '\0' ||
+        !std::isfinite(value)) {
+        throw std::invalid_argument(std::string("invalid ") + argument_name +
+                                    ": " + text);
+    }
+    return value;
+}
+
 void print_usage(const char* executable) {
     std::cerr << "Usage: " << executable
-              << " <model.safetensors> <max_new_tokens> <prompt_id>...\n";
+              << " [--temp T] [--top-k K] [--top-p P]"
+                 " <model.safetensors> <max_new_tokens> <prompt_id>...\n"
+              << "       options may also appear between max_new_tokens and"
+                 " the prompt tokens\n";
+}
+
+struct ParsedArguments {
+    std::string model_path;
+    int max_new_tokens = 0;
+    std::vector<int> prompt;
+    stratakv::generation::SamplerConfig sampler{0.0f, 0, 1.0f};
+};
+
+ParsedArguments parse_arguments(int argc, char** argv) {
+    std::vector<std::string> positional;
+    positional.reserve(argc > 1 ? static_cast<std::size_t>(argc - 1) : 0u);
+    ParsedArguments result;
+
+    for (int index = 1; index < argc;) {
+        const std::string argument = argv[index];
+        if (argument == "--temp") {
+            if (++index >= argc)
+                throw std::invalid_argument("--temp requires a value");
+            result.sampler.temperature = parse_float(argv[index], "--temp");
+            ++index;
+            continue;
+        }
+        if (argument == "--top-k") {
+            if (++index >= argc)
+                throw std::invalid_argument("--top-k requires a value");
+            result.sampler.top_k = parse_int(argv[index], "--top-k");
+            ++index;
+            continue;
+        }
+        if (argument == "--top-p") {
+            if (++index >= argc)
+                throw std::invalid_argument("--top-p requires a value");
+            result.sampler.top_p = parse_float(argv[index], "--top-p");
+            ++index;
+            continue;
+        }
+        if (argument.rfind("--", 0) == 0)
+            throw std::invalid_argument("unknown option: " + argument);
+        positional.push_back(argument);
+        ++index;
+    }
+
+    if (positional.size() < 3)
+        throw std::invalid_argument(
+            "expected a model path, max_new_tokens, and at least one prompt token");
+
+    result.model_path = positional[0];
+    result.max_new_tokens = parse_int(positional[1].c_str(), "max_new_tokens");
+    if (result.max_new_tokens < 0)
+        throw std::invalid_argument("max_new_tokens must be nonnegative");
+
+    result.prompt.reserve(positional.size() - 2);
+    for (std::size_t index = 2; index < positional.size(); ++index) {
+        const int token = parse_int(positional[index].c_str(), "prompt token");
+        if (token < 0)
+            throw std::invalid_argument("prompt token must be nonnegative");
+        result.prompt.push_back(token);
+    }
+    return result;
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 4) {
+    if (argc < 2) {
         print_usage(argc > 0 ? argv[0] : "stratakv_cli");
         return 2;
     }
 
     try {
-        const int max_new_tokens = parse_int(argv[2], "max_new_tokens");
-        if (max_new_tokens < 0) {
-            throw std::invalid_argument("max_new_tokens must be nonnegative");
-        }
-
-        std::vector<int> prompt;
-        prompt.reserve(static_cast<std::size_t>(argc - 3));
-        for (int index = 3; index < argc; ++index) {
-            const int token = parse_int(argv[index], "prompt token");
-            if (token < 0) {
-                throw std::invalid_argument("prompt token must be nonnegative");
-            }
-            prompt.push_back(token);
-        }
+        const ParsedArguments arguments = parse_arguments(argc, argv);
 
         stratakv::generation::GeneratorConfig config;
         config.hidden_dim = 2048;
@@ -69,12 +137,13 @@ int main(int argc, char** argv) {
         config.block_size = 16;
         config.vocab_size = 32000;
         config.eos_token_id = 2;
+        config.sampler = arguments.sampler;
 
         auto weights = stratakv::io::load_safetensors(
-            std::filesystem::path(argv[1]));
+            std::filesystem::path(arguments.model_path));
         stratakv::generation::Generator generator(config, std::move(weights));
         const std::vector<int> output =
-            generator.generate(prompt, max_new_tokens);
+            generator.generate(arguments.prompt, arguments.max_new_tokens);
 
         for (std::size_t index = 0; index < output.size(); ++index) {
             if (index != 0) std::cout << ' ';

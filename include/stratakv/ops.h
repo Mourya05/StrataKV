@@ -1,6 +1,9 @@
 ﻿#pragma once
 
 #include "stratakv/tensor.h"
+#if defined(STRATAKV_HAS_CUDA)
+#include "stratakv/cuda/gemm_cuda.h"
+#endif
 
 namespace stratakv {
 
@@ -22,8 +25,4 @@ void matmul_cpu_avx2(const Tensor& A, const Tensor& B, Tensor& C);
 //
 //  Only declared when STRATAKV_HAS_CUDA is defined by CMake.
 // ============================================================
-#if defined(STRATAKV_HAS_CUDA)
-void matmul_cuda_tiled(const Tensor& A, const Tensor& B, Tensor& C);
-#endif
-
 } // namespace stratakv

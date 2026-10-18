@@ -107,8 +107,12 @@ int main(int argc, char** argv) {
         write_file(file,
             R"({"x":{"data_offsets":[0,4],"shape":[2],"dtype":"BF16"}})",
             {0x80, 0x3F, 0x20, 0xC0});
-        auto bf = stratakv::io::load_safetensors(file);
-        check(bf.at("x")[0] == 1 && bf.at("x")[1] == -2.5f);
+        {
+            // Native BF16 tensors retain the mmap owner, so release this
+            // view before the next case replaces the scratch file on Windows.
+            auto bf = stratakv::io::load_safetensors(file);
+            check(bf.at("x")[0] == 1 && bf.at("x")[1] == -2.5f);
+        }
 
         write_file(file, R"({"z":{"dtype":"F32","shape":[1],"data_offsets":[4,8]},"a":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}})", fp32({7, 9}));
         {

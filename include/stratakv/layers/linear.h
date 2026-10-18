@@ -34,6 +34,10 @@ public:
     Tensor&       weight()       noexcept { return weight_; }
     const Tensor& weight() const noexcept { return weight_; }
 
+    // Replace the backing weight without forcing a dtype conversion. This is
+    // used by the checkpoint loader to keep BF16 weights native.
+    void set_weight(Tensor&& weight_transposed);
+
     Tensor*       bias()       noexcept;
     const Tensor* bias() const noexcept;
 

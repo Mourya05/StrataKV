@@ -50,7 +50,6 @@ Tensor RMSNorm::forward(const Tensor& input) const {
     Tensor output(input.shape());
     const std::size_t rows = input.num_elements() / hidden_dim_;
     const float* input_data = input.data();
-    const float* gamma_data = gamma_.data();
     float* output_data = output.data();
 
     for (std::size_t row = 0; row < rows; ++row) {
@@ -67,7 +66,7 @@ Tensor RMSNorm::forward(const Tensor& input) const {
         const float inverse_rms =
             1.0f / std::sqrt(mean_square + epsilon_);
         for (std::size_t col = 0; col < hidden_dim_; ++col) {
-            output_row[col] = input_row[col] * inverse_rms * gamma_data[col];
+            output_row[col] = input_row[col] * inverse_rms * gamma_[col];
         }
     }
 

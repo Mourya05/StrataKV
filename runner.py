@@ -1,5 +1,6 @@
 """Run the StrataKV token bridge and decode its output with TinyLlama's tokenizer."""
 
+import argparse
 from pathlib import Path
 import subprocess
 import sys
@@ -29,7 +30,25 @@ def find_cli(repository_root: Path) -> Path:
     raise FileNotFoundError(f"stratakv_cli was not found; checked: {expected}")
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--temp", type=float, default=0.8,
+        help="sampling temperature (default: 0.8)",
+    )
+    parser.add_argument(
+        "--top-k", type=int, default=40,
+        help="retain only the K highest-logit tokens (default: 40)",
+    )
+    parser.add_argument(
+        "--top-p", type=float, default=0.95,
+        help="retain the smallest nucleus under this probability (default: 0.95)",
+    )
+    return parser.parse_args()
+
+
 def main() -> int:
+    options = parse_args()
     repository_root = Path(__file__).resolve().parent
     model_path = repository_root / "model.safetensors"
     if not model_path.is_file():
@@ -45,6 +64,12 @@ def main() -> int:
 
     command = [
         str(cli_path),
+        "--temp",
+        str(options.temp),
+        "--top-k",
+        str(options.top_k),
+        "--top-p",
+        str(options.top_p),
         str(model_path),
         str(MAX_NEW_TOKENS),
         *(str(token_id) for token_id in prompt_ids),

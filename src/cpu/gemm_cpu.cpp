@@ -96,6 +96,27 @@ void matmul_cpu_avx2(const Tensor& A, const Tensor& B, Tensor& C) {
         throw std::invalid_argument(
             "matmul_cpu_avx2: output tensor C has wrong shape.");
     }
+    if (C.dtype() != DataType::FP32) {
+        throw std::invalid_argument(
+            "matmul_cpu_avx2: output tensor must be FP32");
+    }
+
+    // CPU inference keeps activations and outputs in FP32, but this scalar
+    // fallback lets a CPU-only build consume a native BF16 checkpoint without
+    // first materializing every weight as FP32. CUDA uses its vectorized
+    // __nv_bfloat162 path for the same input combination.
+    if (A.dtype() != DataType::FP32 || B.dtype() != DataType::FP32) {
+        float* output = C.data();
+        for (size_t row = 0; row < M; ++row) {
+            for (size_t col = 0; col < N; ++col) {
+                float sum = 0.0f;
+                for (size_t k = 0; k < K; ++k)
+                    sum += A.value_at(row * K + k) * B.value_at(k * N + col);
+                output[row * N + col] = sum;
+            }
+        }
+        return;
+    }
 
     // Zero the output matrix.
     std::memset(C.data(), 0, M * N * sizeof(float));

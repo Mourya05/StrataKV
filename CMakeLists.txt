@@ -140,4 +140,9 @@ if(BUILD_TESTING)
     target_link_libraries(phase6_smoke PRIVATE stratakv)
     add_test(NAME phase6_smoke
              COMMAND phase6_smoke "${CMAKE_CURRENT_BINARY_DIR}")
+
+    add_executable(phase7_smoke tests/phase7_smoke.cpp)
+    target_link_libraries(phase7_smoke PRIVATE stratakv)
+    add_test(NAME phase7_smoke
+             COMMAND phase7_smoke "${CMAKE_CURRENT_BINARY_DIR}")
 endif()

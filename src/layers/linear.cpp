@@ -69,6 +69,17 @@ const Tensor* Linear::bias() const noexcept {
     return bias_ ? &*bias_ : nullptr;
 }
 
+void Linear::set_weight(Tensor&& weight_transposed) {
+    if (weight_transposed.ndim() != 2 ||
+        weight_transposed.shape()[0] != input_dim_ ||
+        weight_transposed.shape()[1] != output_dim_ ||
+        weight_transposed.num_elements() != input_dim_ * output_dim_) {
+        throw std::invalid_argument(
+            "Linear::set_weight: weight shape does not match layer");
+    }
+    weight_ = std::move(weight_transposed);
+}
+
 Tensor Linear::forward(const Tensor& input) const {
     if (input.ndim() != 2) {
         throw std::invalid_argument(
