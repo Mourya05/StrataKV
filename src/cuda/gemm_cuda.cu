@@ -199,6 +199,43 @@ __global__ void rope_split_half_kernel(float* __restrict__ tensor,
     }
 }
 
+__global__ void generate_rope_frequencies_kernel(float* __restrict__ cos_ptr,
+                                                 float* __restrict__ sin_ptr,
+                                                 int half_dim, int position,
+                                                 int head_dim)
+{
+    const int index = static_cast<int>(blockIdx.x) *
+            ELEMENTWISE_THREADS + static_cast<int>(threadIdx.x);
+    if (index < half_dim) {
+        const float exponent = -2.0f * static_cast<float>(index) /
+            static_cast<float>(head_dim);
+        const float angle = static_cast<float>(position) *
+            powf(10000.0f, exponent);
+        sincosf(angle, &sin_ptr[index], &cos_ptr[index]);
+    }
+}
+
+__global__ void add_inplace_kernel(float* __restrict__ target,
+                                   const float* __restrict__ source,
+                                   int count)
+{
+    const int index = static_cast<int>(blockIdx.x) *
+        ELEMENTWISE_THREADS + static_cast<int>(threadIdx.x);
+    if (index < count)
+        target[index] += source[index];
+}
+
+__global__ void embedding_lookup_kernel(const float* __restrict__ table,
+                                        int token_id, int hidden_size,
+                                        float* __restrict__ output)
+{
+    const int index = static_cast<int>(blockIdx.x) *
+        ELEMENTWISE_THREADS + static_cast<int>(threadIdx.x);
+    if (index < hidden_size)
+        output[index] = table[static_cast<size_t>(token_id) *
+                               static_cast<size_t>(hidden_size) + index];
+}
+
 // ---------------------------------------------------------------------------
 //  paged_attention_decode_kernel
 //
@@ -573,6 +610,50 @@ void rope_split_half_cuda(float* tensor, const float* cos_ptr,
     rope_split_half_kernel<<<static_cast<unsigned>(num_heads),
                              ELEMENTWISE_THREADS>>>(
         tensor, cos_ptr, sin_ptr, head_dim);
+    CUDA_CHECK_KERNEL();
+}
+
+void generate_rope_frequencies_cuda(float* cos_ptr, float* sin_ptr,
+                                    int half_dim, int position, int head_dim)
+{
+    if (cos_ptr == nullptr || sin_ptr == nullptr || half_dim <= 0 ||
+        position < 0 || head_dim <= 0 || head_dim != half_dim * 2) {
+        throw std::invalid_argument(
+            "generate_rope_frequencies_cuda: invalid device pointers or "
+            "dimensions");
+    }
+    generate_rope_frequencies_kernel<<<
+        (static_cast<unsigned>(half_dim) + ELEMENTWISE_THREADS - 1) /
+            ELEMENTWISE_THREADS,
+        ELEMENTWISE_THREADS>>>(cos_ptr, sin_ptr, half_dim, position, head_dim);
+    CUDA_CHECK_KERNEL();
+}
+
+void add_inplace_cuda(float* target, const float* source, int count)
+{
+    if (target == nullptr || source == nullptr || count <= 0) {
+        throw std::invalid_argument(
+            "add_inplace_cuda: expected non-null pointers and positive count");
+    }
+    add_inplace_kernel<<<
+        (static_cast<unsigned>(count) + ELEMENTWISE_THREADS - 1) /
+            ELEMENTWISE_THREADS,
+        ELEMENTWISE_THREADS>>>(target, source, count);
+    CUDA_CHECK_KERNEL();
+}
+
+void embedding_lookup_cuda(const float* table, int token_id, int hidden_size,
+                           float* output)
+{
+    if (table == nullptr || output == nullptr || token_id < 0 ||
+        hidden_size <= 0) {
+        throw std::invalid_argument(
+            "embedding_lookup_cuda: invalid device pointers or dimensions");
+    }
+    embedding_lookup_kernel<<<
+        (static_cast<unsigned>(hidden_size) + ELEMENTWISE_THREADS - 1) /
+            ELEMENTWISE_THREADS,
+        ELEMENTWISE_THREADS>>>(table, token_id, hidden_size, output);
     CUDA_CHECK_KERNEL();
 }
 

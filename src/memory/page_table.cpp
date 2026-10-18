@@ -4,12 +4,27 @@
 
 #include "stratakv/memory/page_table.h"
 
+#if defined(STRATAKV_HAS_CUDA)
+#include <cuda_runtime_api.h>
+#endif
+
 #include <stdexcept>
 #include <string>
 #include <limits>
+#include <utility>
 
 namespace stratakv {
 namespace memory  {
+
+namespace {
+#if defined(STRATAKV_HAS_CUDA)
+void check_cuda(cudaError_t status, const char* operation) {
+    if (status != cudaSuccess)
+        throw std::runtime_error(std::string("PageTable: ") + operation +
+                                 " failed: " + cudaGetErrorString(status));
+}
+#endif
+} // namespace
 
 // ---------------------------------------------------------------------------
 //  helpers
@@ -24,6 +39,62 @@ static SequenceState& checked_lookup(std::unordered_map<int, SequenceState>& tab
     return it->second;
 }
 
+PageTable::PageTable(const PageTable& other)
+    : table_(other.table_)
+{
+}
+
+PageTable& PageTable::operator=(const PageTable& other) {
+    if (this != &other) {
+        release_device_block_table();
+        table_ = other.table_;
+        staged_seq_id_ = 0;
+        device_table_dirty_ = true;
+    }
+    return *this;
+}
+
+PageTable::PageTable(PageTable&& other) noexcept
+    : table_(std::move(other.table_))
+    , d_block_table_(other.d_block_table_)
+    , d_block_table_capacity_(other.d_block_table_capacity_)
+    , staged_seq_id_(other.staged_seq_id_)
+    , device_table_dirty_(other.device_table_dirty_)
+{
+    other.d_block_table_ = nullptr;
+    other.d_block_table_capacity_ = 0;
+    other.device_table_dirty_ = true;
+}
+
+PageTable& PageTable::operator=(PageTable&& other) noexcept {
+    if (this != &other) {
+        release_device_block_table();
+        table_ = std::move(other.table_);
+        d_block_table_ = other.d_block_table_;
+        d_block_table_capacity_ = other.d_block_table_capacity_;
+        staged_seq_id_ = other.staged_seq_id_;
+        device_table_dirty_ = other.device_table_dirty_;
+        other.d_block_table_ = nullptr;
+        other.d_block_table_capacity_ = 0;
+        other.device_table_dirty_ = true;
+    }
+    return *this;
+}
+
+PageTable::~PageTable() noexcept {
+    release_device_block_table();
+}
+
+void PageTable::release_device_block_table() noexcept {
+#if defined(STRATAKV_HAS_CUDA)
+    if (d_block_table_ != nullptr)
+        (void)cudaFree(d_block_table_);
+#endif
+    d_block_table_ = nullptr;
+    d_block_table_capacity_ = 0;
+    device_table_dirty_ = true;
+}
+
 // ---------------------------------------------------------------------------
 //  allocate_sequence
 // ---------------------------------------------------------------------------
@@ -36,6 +107,7 @@ void PageTable::allocate_sequence(int seq_id, BlockPool& pool) {
     state.sequence_length = 0;
     state.physical_blocks.push_back(pool.allocate_block());  // first block
     table_.emplace(seq_id, std::move(state));
+    device_table_dirty_ = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -65,6 +137,7 @@ void PageTable::append_token(int seq_id, BlockPool& pool) {
     }
 
     ++state.sequence_length;
+    device_table_dirty_ = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -77,6 +150,7 @@ void PageTable::free_sequence(int seq_id, BlockPool& pool) {
         pool.free_block(blk_id);
 
     table_.erase(seq_id);
+    device_table_dirty_ = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -95,6 +169,39 @@ const SequenceState& PageTable::get_state(int seq_id) const {
 // ---------------------------------------------------------------------------
 bool PageTable::has_sequence(int seq_id) const noexcept {
     return table_.count(seq_id) != 0;
+}
+
+const int* PageTable::get_device_block_table(int seq_id) {
+    const SequenceState& state = get_state(seq_id);
+#if defined(STRATAKV_HAS_CUDA)
+    const std::size_t required = state.physical_blocks.size();
+    if (required == 0)
+        throw std::runtime_error(
+            "get_device_block_table: sequence has no physical blocks");
+    if (required > d_block_table_capacity_) {
+        int* replacement = nullptr;
+        check_cuda(cudaMalloc(reinterpret_cast<void**>(&replacement),
+                              required * sizeof(int)),
+                   "cudaMalloc(block_table)");
+        if (d_block_table_ != nullptr)
+            (void)cudaFree(d_block_table_);
+        d_block_table_ = replacement;
+        d_block_table_capacity_ = required;
+        device_table_dirty_ = true;
+    }
+    if (device_table_dirty_ || staged_seq_id_ != seq_id) {
+        check_cuda(cudaMemcpy(d_block_table_, state.physical_blocks.data(),
+                              required * sizeof(int), cudaMemcpyHostToDevice),
+                   "cudaMemcpy(block_table)");
+        staged_seq_id_ = seq_id;
+        device_table_dirty_ = false;
+    }
+    return d_block_table_;
+#else
+    (void)state;
+    throw std::runtime_error(
+        "get_device_block_table: CUDA support is not enabled");
+#endif
 }
 
 } // namespace memory

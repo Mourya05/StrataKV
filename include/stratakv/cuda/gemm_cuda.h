@@ -23,6 +23,11 @@ void swiglu_cuda(float* tensor, int hidden_size);
 // Apply split-half RoPE in place to contiguous FP32 head vectors.
 void rope_split_half_cuda(float* tensor, const float* cos_ptr,
                           const float* sin_ptr, int num_heads, int head_dim);
+void generate_rope_frequencies_cuda(float* cos_ptr, float* sin_ptr,
+                                    int half_dim, int position, int head_dim);
+void add_inplace_cuda(float* target, const float* source, int count);
+void embedding_lookup_cuda(const float* table, int token_id, int hidden_size,
+                           float* output);
 
 // Decode one token against paged FP32 KV caches with grouped-query attention.
 void paged_attention_decode_cuda(

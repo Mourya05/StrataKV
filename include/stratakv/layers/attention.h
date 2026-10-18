@@ -33,8 +33,9 @@ public:
 
     // hidden_states is [new_tokens, hidden_dim]. Each row is appended to the
     // sequence and then attends causally to all valid sequence positions.
-    // Device::GPU reserves device KV storage, but full GPU attention kernels
-    // are not yet part of this CPU attention implementation.
+    // GPU decode is orchestrated by TransformerBlock using the device-resident
+    // projections and paged KV cache; this class retains the CPU multi-token
+    // reference implementation.
     Tensor forward(const Tensor& hidden_states,
                    int seq_id,
                    memory::PageTable& page_table,
@@ -55,6 +56,9 @@ public:
     Linear&       output_projection()     noexcept { return out_proj_; }
     const Linear& output_projection() const noexcept { return out_proj_; }
     Device device() const noexcept { return device_; }
+    std::size_t num_heads() const noexcept { return num_heads_; }
+    std::size_t num_kv_heads() const noexcept { return num_kv_heads_; }
+    std::size_t head_dim() const noexcept { return head_dim_; }
 
 private:
     void ensure_cache(const memory::BlockPool& block_pool);

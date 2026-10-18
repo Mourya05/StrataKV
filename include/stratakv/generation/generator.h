@@ -3,6 +3,7 @@
 #include "stratakv/io/safetensors.h"
 #include "stratakv/models/transformer_block.h"
 #include <cstddef>
+#include <optional>
 #include <vector>
 
 namespace stratakv::generation {
@@ -86,6 +87,7 @@ public:
 
 private:
     Tensor embed(const int* ids, std::size_t count) const;
+    void embed_device(int token_id, Tensor& output) const;
     Tensor forward(const Tensor& input);
     // Declaration order ensures validation precedes all internal allocations.
     GeneratorConfig config_;
@@ -96,5 +98,12 @@ private:
     Tensor embeddings_; // [vocab, hidden], owns moved checkpoint tensor.
     layers::RMSNorm final_norm_;
     layers::Linear lm_head_; // GEMM-ready [hidden, vocab].
+    Device device_ = Device::CPU;
+#if defined(STRATAKV_HAS_CUDA)
+    std::optional<Tensor> gpu_embedding_input_;
+    std::optional<Tensor> gpu_final_norm_;
+    std::optional<Tensor> gpu_logits_;
+    std::optional<Tensor> host_logits_;
+#endif
 };
 } // namespace stratakv::generation

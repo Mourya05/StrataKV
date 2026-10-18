@@ -1,4 +1,8 @@
 #include "stratakv/generation/generator.h"
+#if defined(STRATAKV_HAS_CUDA)
+#include "stratakv/cuda/gemm_cuda.h"
+#include <cuda_runtime.h>
+#endif
 #include <algorithm>
 #include <climits>
 #include <cmath>
@@ -51,15 +55,34 @@ GeneratorConfig validate_config(GeneratorConfig c) {
     return c;
 }
 
-std::vector<models::TransformerBlock> make_blocks(const GeneratorConfig& config) {
+Device generator_device() {
+#if defined(STRATAKV_HAS_CUDA)
+    return Device::GPU;
+#else
+    return Device::CPU;
+#endif
+}
+
+std::vector<models::TransformerBlock> make_blocks(const GeneratorConfig& config,
+                                                  Device device) {
     std::vector<models::TransformerBlock> blocks;
     blocks.reserve(config.num_layers);
     for (std::size_t layer = 0; layer < config.num_layers; ++layer) {
         blocks.emplace_back(config.hidden_dim, config.intermediate_dim,
                             config.num_heads, config.num_kv_heads,
-                            config.total_blocks, config.block_size);
+                            config.total_blocks, config.block_size, device);
     }
     return blocks;
+}
+
+memory::BlockPool make_pool(const GeneratorConfig& config, Device device) {
+    const int kv_heads = static_cast<int>(
+        config.num_kv_heads == 0 ? config.num_heads : config.num_kv_heads);
+    const int head_dim = static_cast<int>(config.hidden_dim / config.num_heads);
+    if (device == Device::GPU)
+        return memory::BlockPool(config.total_blocks, config.block_size,
+                                 kv_heads, head_dim, device);
+    return memory::BlockPool(config.total_blocks, config.block_size);
 }
 
 bool has_weight(const io::WeightMap& weights, const std::string& key) {
@@ -138,8 +161,8 @@ static_assert(std::is_nothrow_move_assignable_v<memory::PageTable> &&
 
 Generator::Generator(GeneratorConfig config, io::WeightMap weights)
     : config_(validate_config(config)),
-      blocks_(make_blocks(config_)),
-      pool_(config_.total_blocks, config_.block_size),
+      blocks_(make_blocks(config_, generator_device())),
+      pool_(make_pool(config_, generator_device())),
       sampler_(config_.sampler),
       embeddings_(take_embedding(weights, config_)),
       final_norm_(take_final_norm(weights, config_)),
@@ -208,6 +231,49 @@ Generator::Generator(GeneratorConfig config, io::WeightMap weights)
                     block.down_projection());
     }
     load_linear(weights, "lm_head.weight", lm_head_);
+
+#if defined(STRATAKV_HAS_CUDA)
+    device_ = Device::GPU;
+    embeddings_ = embeddings_.to(Device::GPU);
+    final_norm_ = layers::RMSNorm(
+        final_norm_.gamma().to(Device::GPU), final_norm_.epsilon());
+    lm_head_.set_weight(lm_head_.weight().to(Device::GPU));
+    for (auto& block : blocks_) {
+        block.input_norm() = layers::RMSNorm(
+            block.input_norm().gamma().to(Device::GPU),
+            block.input_norm().epsilon());
+        block.post_attention_norm() = layers::RMSNorm(
+            block.post_attention_norm().gamma().to(Device::GPU),
+            block.post_attention_norm().epsilon());
+        auto& attention = block.attention();
+        attention.query_projection().set_weight(
+            attention.query_projection().weight().to(Device::GPU));
+        attention.key_projection().set_weight(
+            attention.key_projection().weight().to(Device::GPU));
+        attention.value_projection().set_weight(
+            attention.value_projection().weight().to(Device::GPU));
+        attention.output_projection().set_weight(
+            attention.output_projection().weight().to(Device::GPU));
+        block.gate_projection().set_weight(
+            block.gate_projection().weight().to(Device::GPU));
+        block.up_projection().set_weight(
+            block.up_projection().weight().to(Device::GPU));
+        block.down_projection().set_weight(
+            block.down_projection().weight().to(Device::GPU));
+    }
+    gpu_embedding_input_.emplace(
+        std::vector<std::size_t>{1, config_.hidden_dim}, DataType::FP32,
+        Device::GPU);
+    gpu_final_norm_.emplace(
+        std::vector<std::size_t>{1, config_.hidden_dim}, DataType::FP32,
+        Device::GPU);
+    gpu_logits_.emplace(
+        std::vector<std::size_t>{1, config_.vocab_size}, DataType::FP32,
+        Device::GPU);
+    host_logits_.emplace(
+        std::vector<std::size_t>{1, config_.vocab_size}, DataType::FP32,
+        Device::CPU);
+#endif
     if (!weights.empty())
         throw std::invalid_argument("Unexpected weight: " + weights.begin()->first);
 }
@@ -221,6 +287,23 @@ Tensor Generator::embed(const int* ids, std::size_t count) const {
             input[row * h + col] = embeddings_[
                 static_cast<std::size_t>(ids[row]) * h + col];
     return input;
+}
+
+void Generator::embed_device(int token_id, Tensor& output) const {
+#if defined(STRATAKV_HAS_CUDA)
+    if (device_ != Device::GPU || output.device() != Device::GPU ||
+        output.shape() != std::vector<std::size_t>{1, config_.hidden_dim}) {
+        throw std::invalid_argument("Generator: invalid GPU embedding buffer");
+    }
+    embedding_lookup_cuda(
+        static_cast<const float*>(embeddings_.raw_data()), token_id,
+        static_cast<int>(config_.hidden_dim),
+        static_cast<float*>(output.raw_data()));
+#else
+    (void)token_id;
+    (void)output;
+    throw std::runtime_error("Generator: GPU embedding requires CUDA support");
+#endif
 }
 
 Tensor Generator::forward(const Tensor& input) {
@@ -254,21 +337,56 @@ std::vector<int> Generator::generate(const std::vector<int>& prompt,
     result.insert(result.end(), prompt.begin(), prompt.end());
     SequenceGuard guard(pages_, pool_); // Armed before sequence allocation.
     pages_.allocate_sequence(0, pool_);
-    Tensor last({1, config_.hidden_dim});
-    {
+    Tensor last({1, config_.hidden_dim}, DataType::FP32, device_);
+    if (device_ == Device::GPU) {
+#if defined(STRATAKV_HAS_CUDA)
+        for (int token : prompt) {
+            embed_device(token, *gpu_embedding_input_);
+            last = forward(*gpu_embedding_input_);
+        }
+#endif
+    } else {
         Tensor hidden = forward(embed(prompt.data(), prompt.size()));
         std::copy_n(hidden.data() + (prompt.size() - 1) * config_.hidden_dim,
                     config_.hidden_dim, last.data());
-    } // Retain only the last prefill row.
+    }
     for (int step = 0; step < max_new_tokens; ++step) {
-        Tensor normalized = final_norm_.forward(last);
-        Tensor logits = lm_head_.forward(normalized);
-        const int next = sampler_.sample(logits);
+        int next = 0;
+        if (device_ == Device::GPU) {
+#if defined(STRATAKV_HAS_CUDA)
+            rmsnorm_cuda(
+                static_cast<const float*>(last.raw_data()),
+                static_cast<float*>(gpu_final_norm_->raw_data()),
+                static_cast<const float*>(final_norm_.gamma().raw_data()),
+                static_cast<int>(config_.hidden_dim), final_norm_.epsilon());
+            matmul_cuda_tiled(*gpu_final_norm_, lm_head_.weight(),
+                              *gpu_logits_);
+            const auto copy_status = cudaMemcpy(
+                host_logits_->raw_data(), gpu_logits_->raw_data(),
+                config_.vocab_size * sizeof(float), cudaMemcpyDeviceToHost);
+            if (copy_status != cudaSuccess)
+                throw std::runtime_error(
+                    std::string("Generator: logits copy failed: ") +
+                    cudaGetErrorString(copy_status));
+            next = sampler_.sample(*host_logits_);
+#endif
+        } else {
+            Tensor normalized = final_norm_.forward(last);
+            Tensor logits = lm_head_.forward(normalized);
+            next = sampler_.sample(logits);
+        }
         result.push_back(next);
         if (next == config_.eos_token_id || step + 1 == max_new_tokens) break;
         // Attention appends/caches this row. Never manually append the token
         // and never reuse the previous hidden state as the next embedding.
-        last = forward(embed(&next, 1));
+        if (device_ == Device::GPU) {
+#if defined(STRATAKV_HAS_CUDA)
+            embed_device(next, *gpu_embedding_input_);
+            last = forward(*gpu_embedding_input_);
+#endif
+        } else {
+            last = forward(embed(&next, 1));
+        }
     }
     return result; // Guard restores allocator state, including on exceptions.
 }

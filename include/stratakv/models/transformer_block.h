@@ -15,13 +15,15 @@ public:
                      std::size_t intermediate_dim,
                      std::size_t num_heads,
                      int total_blocks,
-                     int block_size);
+                     int block_size,
+                     Device device = Device::CPU);
     TransformerBlock(std::size_t hidden_dim,
                      std::size_t intermediate_dim,
                      std::size_t num_heads,
                      std::size_t num_kv_heads,
                      int total_blocks,
-                     int block_size);
+                     int block_size,
+                     Device device = Device::CPU);
 
     TransformerBlock(const TransformerBlock&)            = delete;
     TransformerBlock& operator=(const TransformerBlock&) = delete;

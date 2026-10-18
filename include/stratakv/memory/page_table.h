@@ -25,6 +25,7 @@
 
 #include "stratakv/memory/block_pool.h"
 
+#include <cstddef>
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
@@ -47,6 +48,11 @@ struct SequenceState {
 class PageTable {
 public:
     PageTable() = default;
+    PageTable(const PageTable& other);
+    PageTable& operator=(const PageTable& other);
+    PageTable(PageTable&& other) noexcept;
+    PageTable& operator=(PageTable&& other) noexcept;
+    ~PageTable() noexcept;
 
     // -------------------------------------------------------------------------
     //  allocate_sequence
@@ -81,8 +87,17 @@ public:
     // -------------------------------------------------------------------------
     bool has_sequence(int seq_id) const noexcept;
 
+    // Copy the sequence's physical block IDs into a reusable GPU buffer.
+    const int* get_device_block_table(int seq_id);
+
 private:
+    void release_device_block_table() noexcept;
+
     std::unordered_map<int, SequenceState> table_;
+    int* d_block_table_ = nullptr;
+    std::size_t d_block_table_capacity_ = 0;
+    int staged_seq_id_ = 0;
+    bool device_table_dirty_ = true;
 };
 
 } // namespace memory
