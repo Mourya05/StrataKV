@@ -173,27 +173,27 @@ __global__ void swiglu_kernel(float* __restrict__ tensor, int hidden_size)
 }
 
 // ---------------------------------------------------------------------------
-//  rope_interleaved_kernel
+//  rope_split_half_kernel
 //
-//  One block handles one head. Adjacent values form each rotary pair, and
-//  both values are read before either result is written.
+//  One block handles one head. The two halves are read before either result
+//  is written, so the transform is safe for the in-place tensor layout.
 // ---------------------------------------------------------------------------
-__global__ void rope_interleaved_kernel(float* __restrict__ tensor,
-                                        const float* __restrict__ cos_ptr,
-                                        const float* __restrict__ sin_ptr,
-                                        int head_dim)
+__global__ void rope_split_half_kernel(float* __restrict__ tensor,
+                                       const float* __restrict__ cos_ptr,
+                                       const float* __restrict__ sin_ptr,
+                                       int head_dim)
 {
+    const int half_dim = head_dim / 2;
     const int head_offset = static_cast<int>(blockIdx.x) * head_dim;
 
-    for (int i = static_cast<int>(threadIdx.x) * 2; i < head_dim;
-         i += ELEMENTWISE_THREADS * 2) {
-        const int first = head_offset + i;
-        const int second = first + 1;
-        const int pair = i / 2;
+    for (int index = static_cast<int>(threadIdx.x); index < half_dim;
+         index += ELEMENTWISE_THREADS) {
+        const int first = head_offset + index;
+        const int second = first + half_dim;
         const float x1 = tensor[first];
         const float x2 = tensor[second];
-        const float cos_val = cos_ptr[pair];
-        const float sin_val = sin_ptr[pair];
+        const float cos_val = cos_ptr[index];
+        const float sin_val = sin_ptr[index];
         tensor[first] = x1 * cos_val - x2 * sin_val;
         tensor[second] = x2 * cos_val + x1 * sin_val;
     }
@@ -598,17 +598,17 @@ void swiglu_cuda(float* tensor, int hidden_size)
     CUDA_CHECK_KERNEL();
 }
 
-void rope_interleaved_cuda(float* tensor, const float* cos_ptr,
-                           const float* sin_ptr, int num_heads, int head_dim)
+void rope_split_half_cuda(float* tensor, const float* cos_ptr,
+                          const float* sin_ptr, int num_heads, int head_dim)
 {
     if (tensor == nullptr || cos_ptr == nullptr || sin_ptr == nullptr ||
         num_heads <= 0 || head_dim <= 0 || (head_dim % 2) != 0) {
         throw std::invalid_argument(
-            "rope_interleaved_cuda: expected non-null device pointers, "
+            "rope_split_half_cuda: expected non-null device pointers, "
             "positive num_heads, and a positive even head_dim");
     }
-    rope_interleaved_kernel<<<static_cast<unsigned>(num_heads),
-                              ELEMENTWISE_THREADS>>>(
+    rope_split_half_kernel<<<static_cast<unsigned>(num_heads),
+                             ELEMENTWISE_THREADS>>>(
         tensor, cos_ptr, sin_ptr, head_dim);
     CUDA_CHECK_KERNEL();
 }

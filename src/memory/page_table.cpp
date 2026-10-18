@@ -184,10 +184,11 @@ const int* PageTable::get_device_block_table(int seq_id) {
     if (required == 0)
         throw std::runtime_error(
             "get_device_block_table: sequence has no physical blocks");
+    const std::size_t bytes = required * sizeof(int);
     if (required > d_block_table_capacity_) {
         int* replacement = nullptr;
         check_cuda(cudaMalloc(reinterpret_cast<void**>(&replacement),
-                              required * sizeof(int)),
+                              bytes),
                    "cudaMalloc(block_table)");
         if (d_block_table_ != nullptr)
             (void)cudaFree(d_block_table_);
@@ -198,7 +199,7 @@ const int* PageTable::get_device_block_table(int seq_id) {
     if (device_table_dirty_ || staged_seq_id_ != seq_id ||
         staged_block_count_ != required) {
         check_cuda(cudaMemcpy(d_block_table_, state.physical_blocks.data(),
-                              required * sizeof(int), cudaMemcpyHostToDevice),
+                              bytes, cudaMemcpyHostToDevice),
                    "cudaMemcpy(block_table)");
         staged_seq_id_ = seq_id;
         staged_block_count_ = required;
