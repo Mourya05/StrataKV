@@ -1,5 +1,5 @@
 ﻿// =============================================================================
-//  gemm_cuda.cu  --  Phase 2: 32x32 Shared-Memory Tiled CUDA GEMM
+//  gemm_cuda.cu  --  Shared-Memory Tiled CUDA GEMM
 //
 //  Algorithm:
 //    Grid  : ceil(M/TILE) x ceil(N/TILE) blocks
@@ -12,7 +12,7 @@
 //
 //  Shared memory used per block:
 //    2 * TILE * TILE * sizeof(float) = 2 * 32 * 32 * 4 = 8 KB
-//  Well within the 48 KB shared-mem bank on Turing/Ampere SMs.
+//  Well within the shared-memory budget of the target GPUs.
 // =============================================================================
 
 #include "stratakv/cuda_utils.cuh"
@@ -49,7 +49,8 @@ __global__ void gemm_tiled_kernel(const float* __restrict__ A,
                                          float* __restrict__ C,
                                    int M, int N, int K)
 {
-    // Shared memory tiles -- double-buffered in a single allocation.
+    // Shared memory tiles. Every global operand loaded by this block is reused
+    // by TILE output threads before the next K tile replaces it.
     __shared__ float As[TILE][TILE];
     __shared__ float Bs[TILE][TILE];
 
@@ -260,7 +261,7 @@ void matmul_cuda_tiled(const Tensor& A, const Tensor& B, Tensor& C)
     //  Step 3: Launch kernel
     //
     //  Grid  : each block covers a TILE x TILE patch of C
-    //  Block : TILE x TILE threads
+    //  Block : TILE x TILE threads for FP32, (TILE/2) x TILE for BF16
     //    blockDim.x = col dimension  (N axis)
     //    blockDim.y = row dimension  (M axis)
     // ------------------------------------------------------------------
@@ -271,7 +272,7 @@ void matmul_cuda_tiled(const Tensor& A, const Tensor& B, Tensor& C)
     );
 
     if (bf16_inputs) {
-        const dim3 bf16_block(16, TILE);
+        const dim3 bf16_block(TILE / 2, TILE);
         const dim3 bf16_grid(
             (static_cast<unsigned>(N) + TILE - 1) / TILE,
             (static_cast<unsigned>(M) + TILE - 1) / TILE

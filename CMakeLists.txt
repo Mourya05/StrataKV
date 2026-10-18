@@ -11,21 +11,6 @@ set(CMAKE_CUDA_FLAGS_INIT "-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH")
 # ---------------------------------------------------------
 option(STRATAKV_CUDA "Enable CUDA sources (Phase 2+)" ON)
 
-# ---------------------------------------------------------
-# CUDA 12.2 + MSVC 14.40+ compatibility shim.
-# The newer STL headers added a static_assert that fires when
-# CUDA < 12.4 is detected.  Suppressing it requires the define
-# to reach cl.exe (the host compiler), so it must be forwarded
-# through nvcc with -Xcompiler -- a bare -D is not enough.
-# Setting CMAKE_CUDA_FLAGS *before* project() ensures this flag
-# is present during the compiler-identification step.
-# ---------------------------------------------------------
-if(STRATAKV_CUDA AND MSVC)
-    set(CMAKE_CUDA_FLAGS
-        "${CMAKE_CUDA_FLAGS} -Xcompiler /D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH"
-        CACHE STRING "" FORCE)
-endif()
-
 # Initialise languages -- add CUDA only when requested.
 if(STRATAKV_CUDA)
     project(StrataKV LANGUAGES CXX CUDA)
@@ -46,12 +31,6 @@ if(STRATAKV_CUDA)
     if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
         set(CMAKE_CUDA_ARCHITECTURES 61)
     endif()
-endif()
-
-# CUDA-specific compiler options
-if(STRATAKV_CUDA AND CMAKE_CUDA_COMPILER_LOADED)
-    # Fast math enables hardware-accelerated reciprocal and transcendental ops
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3 --use_fast_math")
 endif()
 
 # ---------------------------------------------------------
@@ -105,11 +84,33 @@ endif()
 # ---------------------------------------------------------
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(stratakv PRIVATE
-        $<$<COMPILE_LANGUAGE:CXX>:-O3 -mavx2 -mfma -Wall -Wextra -Wpedantic>
+        $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-O3>
+        $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-mavx2>
+        $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-mfma>
+        $<$<COMPILE_LANGUAGE:CXX>:-Wall>
+        $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
+        $<$<COMPILE_LANGUAGE:CXX>:-Wpedantic>
     )
 elseif(MSVC)
     target_compile_options(stratakv PRIVATE
-        $<$<COMPILE_LANGUAGE:CXX>:/O2 /arch:AVX2 /W4>
+        $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:/O2>
+        $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:/fp:fast>
+        $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:/arch:AVX2>
+        $<$<COMPILE_LANGUAGE:CXX>:/W4>
+    )
+endif()
+
+# Keep optimization flags language- and configuration-scoped. In particular,
+# /arch:AVX2 must never be handed directly to nvcc, while the CUDA host
+# compiler still receives the equivalent options through -Xcompiler.
+if(STRATAKV_CUDA)
+    target_compile_options(stratakv PRIVATE
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Release>>:-O3>
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Release>>:--use_fast_math>
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Release>>:-Xptxas=-O3>
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Release>>:-Xcompiler=/O2>
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Release>>:-Xcompiler=/fp:fast>
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Release>>:-Xcompiler=/arch:AVX2>
     )
 endif()
 

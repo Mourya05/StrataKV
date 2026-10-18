@@ -85,14 +85,13 @@
       <BufferSecurityCheck></BufferSecurityCheck>
       <CallingConvention></CallingConvention>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
-      <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
       <ExceptionHandling>Sync</ExceptionHandling>
       <FloatingPointModel></FloatingPointModel>
       <ForceConformanceInForLoopScope></ForceConformanceInForLoopScope>
       <InlineFunctionExpansion>Disabled</InlineFunctionExpansion>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <MinimalRebuild></MinimalRebuild>
-      <Optimization>MaxSpeed</Optimization>
+      <Optimization>Disabled</Optimization>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <RemoveUnreferencedCodeData></RemoveUnreferencedCodeData>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
@@ -112,11 +111,10 @@
     <CudaCompile>
       <Include>E:\My Folder\Mourya folder\Projects\StrataKV\include;%(Include)</Include>
       <Defines>%(Defines);_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH;_WINDOWS;STRATAKV_HAS_CUDA;CMAKE_INTDIR="Debug"</Defines>
-      <AdditionalOptions>%(AdditionalOptions) -forward-unknown-to-host-compiler -O3 -std=c++17 --generate-code=arch=compute_61,code=[compute_61,sm_61] -Xcompiler="/EHsc -Zi -Ob0"</AdditionalOptions>
+      <AdditionalOptions>%(AdditionalOptions) -forward-unknown-to-host-compiler -std=c++17 --generate-code=arch=compute_61,code=[compute_61,sm_61] -Xcompiler="/EHsc -Zi -Ob0"</AdditionalOptions>
       <CodeGeneration></CodeGeneration>
       <CompileOut>$(IntDir)%(Filename).obj</CompileOut>
       <CudaRuntime>Static</CudaRuntime>
-      <FastMath>true</FastMath>
       <GPUDebugInfo>false</GPUDebugInfo>
       <Optimization>Od</Optimization>
       <Runtime>MDd</Runtime>
@@ -135,7 +133,7 @@
     </Midl>
     <CudaLink>
       <AdditionalDependencies>cudadevrt.lib ;cudart_static.lib </AdditionalDependencies>
-      <AdditionalOptions>-forward-unknown-to-host-compiler -Wno-deprecated-gpu-targets -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH  -D_WINDOWS -Xcompiler=" /GR /EHsc" -O3 --use_fast_math -Xcompiler=" -Zi -Ob0 -Od /RTC1" "--generate-code=arch=compute_61,code=[compute_61,sm_61]" -Xcompiler=-MDd</AdditionalOptions>
+      <AdditionalOptions>-forward-unknown-to-host-compiler -Wno-deprecated-gpu-targets -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH  -D_WINDOWS -Xcompiler=" /GR /EHsc" -Xcompiler=" -Zi -Ob0 -Od /RTC1" "--generate-code=arch=compute_61,code=[compute_61,sm_61]" -Xcompiler=-MDd</AdditionalOptions>
       <PerformDeviceLink>true</PerformDeviceLink>
     </CudaLink>
     <Lib>
@@ -151,7 +149,7 @@
       <CallingConvention></CallingConvention>
       <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
       <ExceptionHandling>Sync</ExceptionHandling>
-      <FloatingPointModel></FloatingPointModel>
+      <FloatingPointModel>Fast</FloatingPointModel>
       <ForceConformanceInForLoopScope></ForceConformanceInForLoopScope>
       <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
       <LanguageStandard>stdcpp17</LanguageStandard>
@@ -178,7 +176,7 @@
     <CudaCompile>
       <Include>E:\My Folder\Mourya folder\Projects\StrataKV\include;%(Include)</Include>
       <Defines>%(Defines);_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH;_WINDOWS;NDEBUG;STRATAKV_HAS_CUDA;CMAKE_INTDIR="Release"</Defines>
-      <AdditionalOptions>%(AdditionalOptions) -forward-unknown-to-host-compiler -O3 -std=c++17 --generate-code=arch=compute_61,code=[compute_61,sm_61] -Xcompiler="/EHsc -Ob2"</AdditionalOptions>
+      <AdditionalOptions>%(AdditionalOptions) -forward-unknown-to-host-compiler -std=c++17 --generate-code=arch=compute_61,code=[compute_61,sm_61] -O3 -Xptxas=-O3 -Xcompiler="/EHsc -Ob2 /fp:fast /arch:AVX2"</AdditionalOptions>
       <CodeGeneration></CodeGeneration>
       <CompileOut>$(IntDir)%(Filename).obj</CompileOut>
       <CudaRuntime>Static</CudaRuntime>
@@ -200,7 +198,7 @@
     </Midl>
     <CudaLink>
       <AdditionalDependencies>cudadevrt.lib ;cudart_static.lib </AdditionalDependencies>
-      <AdditionalOptions>-forward-unknown-to-host-compiler -Wno-deprecated-gpu-targets -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH  -D_WINDOWS -Xcompiler=" /GR /EHsc" -O3 --use_fast_math -Xcompiler="-O2 -Ob2" -DNDEBUG "--generate-code=arch=compute_61,code=[compute_61,sm_61]" -Xcompiler=-MD</AdditionalOptions>
+      <AdditionalOptions>-forward-unknown-to-host-compiler -Wno-deprecated-gpu-targets -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH  -D_WINDOWS -Xcompiler=" /GR /EHsc" -Xcompiler="-O2 -Ob2" -DNDEBUG "--generate-code=arch=compute_61,code=[compute_61,sm_61]" -Xcompiler=-MD</AdditionalOptions>
       <PerformDeviceLink>true</PerformDeviceLink>
     </CudaLink>
     <Lib>
@@ -214,14 +212,13 @@
       <BasicRuntimeChecks>Default</BasicRuntimeChecks>
       <BufferSecurityCheck></BufferSecurityCheck>
       <CallingConvention></CallingConvention>
-      <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
       <ExceptionHandling>Sync</ExceptionHandling>
       <FloatingPointModel></FloatingPointModel>
       <ForceConformanceInForLoopScope></ForceConformanceInForLoopScope>
       <InlineFunctionExpansion>OnlyExplicitInline</InlineFunctionExpansion>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <MinimalRebuild></MinimalRebuild>
-      <Optimization>MaxSpeed</Optimization>
+      <Optimization>MinSpace</Optimization>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <RemoveUnreferencedCodeData></RemoveUnreferencedCodeData>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
@@ -243,11 +240,10 @@
     <CudaCompile>
       <Include>E:\My Folder\Mourya folder\Projects\StrataKV\include;%(Include)</Include>
       <Defines>%(Defines);_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH;_WINDOWS;NDEBUG;STRATAKV_HAS_CUDA;CMAKE_INTDIR="MinSizeRel"</Defines>
-      <AdditionalOptions>%(AdditionalOptions) -forward-unknown-to-host-compiler -O3 -std=c++17 --generate-code=arch=compute_61,code=[compute_61,sm_61] -Xcompiler="/EHsc -Ob1"</AdditionalOptions>
+      <AdditionalOptions>%(AdditionalOptions) -forward-unknown-to-host-compiler -std=c++17 --generate-code=arch=compute_61,code=[compute_61,sm_61] -Xcompiler="/EHsc -Ob1"</AdditionalOptions>
       <CodeGeneration></CodeGeneration>
       <CompileOut>$(IntDir)%(Filename).obj</CompileOut>
       <CudaRuntime>Static</CudaRuntime>
-      <FastMath>true</FastMath>
       <GPUDebugInfo>false</GPUDebugInfo>
       <Optimization>O1</Optimization>
       <Runtime>MD</Runtime>
@@ -265,7 +261,7 @@
     </Midl>
     <CudaLink>
       <AdditionalDependencies>cudadevrt.lib ;cudart_static.lib </AdditionalDependencies>
-      <AdditionalOptions>-forward-unknown-to-host-compiler -Wno-deprecated-gpu-targets -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH  -D_WINDOWS -Xcompiler=" /GR /EHsc" -O3 --use_fast_math -Xcompiler="-O1 -Ob1" -DNDEBUG "--generate-code=arch=compute_61,code=[compute_61,sm_61]" -Xcompiler=-MD</AdditionalOptions>
+      <AdditionalOptions>-forward-unknown-to-host-compiler -Wno-deprecated-gpu-targets -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH  -D_WINDOWS -Xcompiler=" /GR /EHsc" -Xcompiler="-O1 -Ob1" -DNDEBUG "--generate-code=arch=compute_61,code=[compute_61,sm_61]" -Xcompiler=-MD</AdditionalOptions>
       <PerformDeviceLink>true</PerformDeviceLink>
     </CudaLink>
     <Lib>
@@ -280,7 +276,6 @@
       <BufferSecurityCheck></BufferSecurityCheck>
       <CallingConvention></CallingConvention>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
-      <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
       <ExceptionHandling>Sync</ExceptionHandling>
       <FloatingPointModel></FloatingPointModel>
       <ForceConformanceInForLoopScope></ForceConformanceInForLoopScope>
@@ -307,11 +302,10 @@
     <CudaCompile>
       <Include>E:\My Folder\Mourya folder\Projects\StrataKV\include;%(Include)</Include>
       <Defines>%(Defines);_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH;_WINDOWS;NDEBUG;STRATAKV_HAS_CUDA;CMAKE_INTDIR="RelWithDebInfo"</Defines>
-      <AdditionalOptions>%(AdditionalOptions) -forward-unknown-to-host-compiler -O3 -std=c++17 --generate-code=arch=compute_61,code=[compute_61,sm_61] -Xcompiler="/EHsc -Zi -Ob1"</AdditionalOptions>
+      <AdditionalOptions>%(AdditionalOptions) -forward-unknown-to-host-compiler -std=c++17 --generate-code=arch=compute_61,code=[compute_61,sm_61] -Xcompiler="/EHsc -Zi -Ob1"</AdditionalOptions>
       <CodeGeneration></CodeGeneration>
       <CompileOut>$(IntDir)%(Filename).obj</CompileOut>
       <CudaRuntime>Static</CudaRuntime>
-      <FastMath>true</FastMath>
       <GPUDebugInfo>false</GPUDebugInfo>
       <Optimization>O2</Optimization>
       <Runtime>MD</Runtime>
@@ -329,7 +323,7 @@
     </Midl>
     <CudaLink>
       <AdditionalDependencies>cudadevrt.lib ;cudart_static.lib </AdditionalDependencies>
-      <AdditionalOptions>-forward-unknown-to-host-compiler -Wno-deprecated-gpu-targets -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH  -D_WINDOWS -Xcompiler=" /GR /EHsc" -O3 --use_fast_math -Xcompiler=" -Zi -O2 -Ob1" -DNDEBUG "--generate-code=arch=compute_61,code=[compute_61,sm_61]" -Xcompiler=-MD</AdditionalOptions>
+      <AdditionalOptions>-forward-unknown-to-host-compiler -Wno-deprecated-gpu-targets -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH  -D_WINDOWS -Xcompiler=" /GR /EHsc" -Xcompiler=" -Zi -O2 -Ob1" -DNDEBUG "--generate-code=arch=compute_61,code=[compute_61,sm_61]" -Xcompiler=-MD</AdditionalOptions>
       <PerformDeviceLink>true</PerformDeviceLink>
     </CudaLink>
     <Lib>

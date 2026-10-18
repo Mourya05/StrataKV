@@ -187,6 +187,10 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <Project>{C0E52680-CD95-3B27-A7FB-F60B168E03F6}</Project>
       <Name>phase6_smoke</Name>
     </ProjectReference>
+    <ProjectReference Include="E:\My Folder\Mourya folder\Projects\StrataKV\build\phase7_smoke.vcxproj">
+      <Project>{33583CA8-7AE4-3E30-A075-E48C47BDF0B6}</Project>
+      <Name>phase7_smoke</Name>
+    </ProjectReference>
     <ProjectReference Include="E:\My Folder\Mourya folder\Projects\StrataKV\build\stratakv.vcxproj">
       <Project>{A86DD4C3-2E03-309D-8864-EF88DF8C119A}</Project>
       <Name>stratakv</Name>
