@@ -42,7 +42,20 @@ RMSNorm::RMSNorm(Tensor&& gamma, float epsilon)
 }
 
 void RMSNorm::to(Device device) {
-    gamma_ = gamma_.to(device);
+    if (gamma_.dtype() == DataType::FP32) {
+        gamma_ = gamma_.to(device);
+        return;
+    }
+
+    // CUDA RMSNorm consumes float pointers. Convert through a CPU FP32
+    // staging tensor so this remains correct for both CPU and GPU sources.
+    Tensor source = gamma_.device() == Device::CPU
+        ? std::move(gamma_)
+        : gamma_.to(Device::CPU);
+    Tensor fp32(source.shape(), DataType::FP32, Device::CPU);
+    for (std::size_t i = 0; i < source.num_elements(); ++i)
+        fp32[i] = source.value_at(i);
+    gamma_ = fp32.to(device);
 }
 
 Tensor RMSNorm::forward(const Tensor& input) const {
