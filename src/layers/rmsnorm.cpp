@@ -41,6 +41,10 @@ RMSNorm::RMSNorm(Tensor&& gamma, float epsilon)
     }
 }
 
+void RMSNorm::to(Device device) {
+    gamma_ = gamma_.to(device);
+}
+
 Tensor RMSNorm::forward(const Tensor& input) const {
     if (input.ndim() == 0 || input.shape().back() != hidden_dim_) {
         throw std::invalid_argument(

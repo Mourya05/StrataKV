@@ -80,6 +80,12 @@ void Linear::set_weight(Tensor&& weight_transposed) {
     weight_ = std::move(weight_transposed);
 }
 
+void Linear::to(Device device) {
+    weight_ = weight_.to(device);
+    if (bias_)
+        *bias_ = bias_->to(device);
+}
+
 Tensor Linear::forward(const Tensor& input) const {
     if (input.ndim() != 2) {
         throw std::invalid_argument(

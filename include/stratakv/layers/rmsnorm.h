@@ -25,6 +25,8 @@ public:
     // [tokens, hidden_dim] tensors, but rank >= 1 is also supported.
     Tensor forward(const Tensor& input) const;
 
+    void to(Device device);
+
     Tensor&       gamma()       noexcept { return gamma_; }
     const Tensor& gamma() const noexcept { return gamma_; }
     std::size_t hidden_dim() const noexcept { return hidden_dim_; }

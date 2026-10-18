@@ -30,6 +30,8 @@ public:
 
     Tensor forward(const Tensor& input) const;
 
+    void to(Device device);
+
     // The returned weight is the physical transposed/GEMM-ready tensor.
     Tensor&       weight()       noexcept { return weight_; }
     const Tensor& weight() const noexcept { return weight_; }

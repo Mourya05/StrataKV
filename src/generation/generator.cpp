@@ -235,9 +235,8 @@ Generator::Generator(GeneratorConfig config, io::WeightMap weights)
 #if defined(STRATAKV_HAS_CUDA)
     device_ = Device::GPU;
     embeddings_ = embeddings_.to(Device::GPU);
-    final_norm_ = layers::RMSNorm(
-        final_norm_.gamma().to(Device::GPU), final_norm_.epsilon());
-    lm_head_.set_weight(lm_head_.weight().to(Device::GPU));
+    final_norm_.to(Device::GPU);
+    lm_head_.to(Device::GPU);
     for (auto& block : blocks_)
         block.to(Device::GPU);
     gpu_embedding_input_.emplace(
