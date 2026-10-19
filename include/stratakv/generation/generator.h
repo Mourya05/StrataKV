@@ -8,6 +8,11 @@
 
 namespace stratakv::generation {
 struct GeneratorConfig {
+#if defined(STRATAKV_HAS_CUDA)
+    Device device = Device::GPU;
+#else
+    Device device = Device::CPU;
+#endif
     std::size_t hidden_dim = 0;
     std::size_t intermediate_dim = 0;
     std::size_t num_heads = 0;
@@ -91,6 +96,9 @@ private:
     Tensor embed(const int* ids, std::size_t count) const;
     void embed_device(int token_id, Tensor& output) const;
     Tensor forward(const Tensor& input);
+#if defined(STRATAKV_HAS_CUDA)
+    void forward_into(const Tensor& input, Tensor& output);
+#endif
     // Declaration order ensures validation precedes all internal allocations.
     GeneratorConfig config_;
     std::vector<models::TransformerBlock> blocks_;

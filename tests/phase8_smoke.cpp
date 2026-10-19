@@ -1,8 +1,6 @@
 #include "stratakv/tensor.h"
 
-#if defined(STRATAKV_HAS_CUDA)
 #include "stratakv/ops.h"
-#endif
 
 #include <cmath>
 #include <iostream>
@@ -39,6 +37,30 @@ int main() {
               "default Tensor device is not CPU");
         check(host.to(stratakv::Device::CPU)[5] == 6.0f,
               "CPU-to-CPU Tensor transfer failed");
+
+        stratakv::Tensor matrix({3, 2}, stratakv::DataType::BF16);
+        for (std::size_t i = 0; i < 6; ++i)
+            matrix[i] = static_cast<float>(i + 1);
+        stratakv::Tensor view = matrix.transpose_2d();
+        check(view.raw_data() == matrix.raw_data() &&
+              view.shape() == std::vector<std::size_t>{2, 3} &&
+              view.strides() == std::vector<std::size_t>{1, 2},
+              "BF16 transpose must share storage and track matrix strides");
+        const stratakv::Tensor copied = view.to(stratakv::Device::CPU);
+        check(copied[0] == 1.0f && copied[1] == 3.0f && copied[2] == 5.0f &&
+              copied[3] == 2.0f && copied[4] == 4.0f && copied[5] == 6.0f,
+              "CPU transfer lost transposed logical indexing");
+        stratakv::Tensor cpu_input({1, 2}), cpu_output({1, 3});
+        cpu_input[0] = 1.0f;
+        cpu_input[1] = 2.0f;
+        stratakv::matmul_cpu_avx2(cpu_input, copied, cpu_output);
+        check(cpu_output[0] == 5.0f && cpu_output[1] == 11.0f &&
+              cpu_output[2] == 17.0f,
+              "CPU BF16 GEMM ignored transposed weight strides");
+        view[view.get_flat_index({1, 2})] = 42.0f;
+        check(matrix[5] == 42.0f && view.transpose_2d().is_contiguous(),
+              "BF16 transpose write or double transpose failed");
+        rejects([&] { (void)host.transpose_2d(); });
 
 #if defined(STRATAKV_HAS_CUDA)
         stratakv::Tensor right_host({3, 2});

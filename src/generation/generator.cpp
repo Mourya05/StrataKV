@@ -64,6 +64,8 @@ std::vector<float> host_values_cpu(const Tensor& tensor) {
 }
 
 std::vector<float> parity_host_values(const Tensor& tensor) {
+    if (!tensor.is_contiguous())
+        return host_values_cpu(tensor.to(Device::CPU));
     std::vector<float> values(tensor.num_elements());
     const std::size_t bytes = tensor.num_elements() * tensor.element_size();
     std::vector<unsigned char> raw(bytes);
@@ -152,6 +154,15 @@ std::size_t checked_elements(std::initializer_list<std::size_t> dims) {
 }
 
 GeneratorConfig validate_config(GeneratorConfig c) {
+#if defined(STRATAKV_HAS_CUDA)
+    if (c.device != Device::GPU)
+        throw std::invalid_argument(
+            "Generator: CUDA builds require Device::GPU");
+#else
+    if (c.device != Device::CPU)
+        throw std::invalid_argument(
+            "Generator: CPU-only builds require Device::CPU");
+#endif
     const std::size_t kv_heads =
         c.num_kv_heads == 0 ? c.num_heads : c.num_kv_heads;
     if (c.hidden_dim == 0 || c.intermediate_dim == 0 || c.num_heads == 0 ||
@@ -175,14 +186,6 @@ GeneratorConfig validate_config(GeneratorConfig c) {
                       static_cast<std::size_t>(c.block_size),
                       kv_dim});
     return c;
-}
-
-Device generator_device() {
-#if defined(STRATAKV_HAS_CUDA)
-    return Device::GPU;
-#else
-    return Device::CPU;
-#endif
 }
 
 std::vector<models::TransformerBlock> make_blocks(const GeneratorConfig& config,
@@ -305,12 +308,15 @@ void load_linear(io::WeightMap& weights, const std::string& key,
             throw std::runtime_error(
                 std::string("Generator: linear staging upload failed: ") +
                 cudaGetErrorString(status));
-        Tensor destination({in, out}, DataType::BF16, Device::GPU);
-        transpose_fp32_to_bf16_cuda(
+        // Checkpoints already store [out,in] rows. Keep that physical order
+        // for contiguous-K GEMV, exposing the usual logical [in,out] matrix
+        // through a shared-storage transpose view (no duplicate VRAM weight).
+        Tensor destination({out, in}, DataType::BF16, Device::GPU);
+        convert_fp32_to_bf16_cuda(
             static_cast<const float*>(gpu_staging->raw_data()),
             static_cast<std::uint16_t*>(destination.raw_data()),
-            static_cast<int>(out), static_cast<int>(in));
-        layer.set_weight(std::move(destination));
+            destination.num_elements());
+        layer.set_weight(destination.transpose_2d());
         if (Tensor* bias = layer.bias())
             std::fill_n(bias->data(), bias->num_elements(), 0.0f);
         return;
@@ -367,8 +373,8 @@ static_assert(std::is_nothrow_move_assignable_v<memory::PageTable> &&
 
 Generator::Generator(GeneratorConfig config, io::WeightMap weights)
     : config_(validate_config(config)),
-      blocks_(make_blocks(config_, generator_device())),
-      pools_(make_pools(config_, generator_device())),
+      blocks_(make_blocks(config_, config_.device)),
+      pools_(make_pools(config_, config_.device)),
       pages_(make_pages(config_)),
       sampler_(config_.sampler),
       embeddings_(take_embedding(weights, config_)),
@@ -461,7 +467,7 @@ Generator::Generator(GeneratorConfig config, io::WeightMap weights)
 #endif
 
 #if defined(STRATAKV_HAS_CUDA)
-    device_ = Device::GPU;
+    device_ = config_.device;
     if (embeddings_.dtype() != DataType::FP32) {
         Tensor embedding_fp32(embeddings_.shape(), DataType::FP32);
         parallel_for(embeddings_.num_elements(),
@@ -546,28 +552,47 @@ void Generator::embed_device(int token_id, Tensor& output) const {
 }
 
 Tensor Generator::forward(const Tensor& input) {
-    Tensor output = input.to(input.device());
 #if defined(STRATAKV_HAS_CUDA)
+    if (device_ == Device::GPU) {
+        Tensor output = input.to(Device::GPU);
+        forward_into(input, output);
+        return output;
+    }
+#endif
+    Tensor output = input.to(input.device());
+    for (std::size_t layer = 0; layer < blocks_.size(); ++layer) {
+        output = blocks_[layer].forward(
+            output, 0, pages_[layer], pools_[layer], true);
+    }
+    return output;
+}
+
+#if defined(STRATAKV_HAS_CUDA)
+void Generator::forward_into(const Tensor& input, Tensor& output) {
+    if (device_ != Device::GPU || input.device() != Device::GPU ||
+        output.device() != Device::GPU || input.ndim() != 2 ||
+        input.shape() != std::vector<std::size_t>{1, config_.hidden_dim} ||
+        output.shape() != input.shape() || input.dtype() != DataType::FP32 ||
+        output.dtype() != DataType::FP32) {
+        throw std::invalid_argument("Generator: invalid GPU forward buffers");
+    }
+
     std::vector<std::vector<float>> gpu_layer_values;
     if (!parity_blocks_.empty())
         gpu_layer_values.reserve(blocks_.size());
-#endif
+
+    // The first block reads the embedding input and writes the caller-owned
+    // output.  Later blocks intentionally use output as both input and output;
+    // TransformerBlock delays its final copy until all reads are complete.
+    const Tensor* current = &input;
     for (std::size_t layer = 0; layer < blocks_.size(); ++layer) {
-        if (device_ == Device::GPU) {
-#if defined(STRATAKV_HAS_CUDA)
-            blocks_[layer].forward_into(
-                output, output, 0, pages_[layer], pools_[layer], true);
-#endif
-        } else {
-            output = blocks_[layer].forward(
-                output, 0, pages_[layer], pools_[layer], true);
-        }
-#if defined(STRATAKV_HAS_CUDA)
+        blocks_[layer].forward_into(
+            *current, output, 0, pages_[layer], pools_[layer], true);
+        current = &output;
         if (!parity_blocks_.empty())
             gpu_layer_values.push_back(parity_host_values(output));
-#endif
     }
-#if defined(STRATAKV_HAS_CUDA)
+
     if (!parity_blocks_.empty()) {
         Tensor cpu_input = input.to(Device::CPU);
         Tensor cpu_output = std::move(cpu_input);
@@ -586,9 +611,8 @@ Tensor Generator::forward(const Tensor& input) {
         }
         *parity_last_cpu_ = std::move(cpu_output);
     }
-#endif
-    return output;
 }
+#endif
 
 std::vector<int> Generator::generate(const std::vector<int>& prompt,
                                      int max_new_tokens) {
@@ -615,6 +639,10 @@ std::vector<int> Generator::generate(const std::vector<int>& prompt,
     SequenceGuard guard(pages_, pools_); // Armed before sequence allocation.
     for (std::size_t layer = 0; layer < blocks_.size(); ++layer)
         pages_[layer].allocate_sequence(0, pools_[layer]);
+#if defined(STRATAKV_HAS_CUDA)
+    for (auto& page : pages_)
+        page.reserve_device_block_table(blocks);
+#endif
 #if defined(STRATAKV_HAS_CUDA)
     if (parity_enabled()) {
         for (std::size_t layer = 0; layer < parity_pages_.size(); ++layer) {
@@ -650,7 +678,7 @@ std::vector<int> Generator::generate(const std::vector<int>& prompt,
                              max_diff, gpu[0], gpu[1], gpu[2],
                              cpu[0], cpu[1], cpu[2]);
             }
-            last = forward(*gpu_embedding_input_);
+            forward_into(*gpu_embedding_input_, last);
             if (parity && prompt_position < 2)
                 parity_final_step(prompt_position, last, *parity_last_cpu_,
                                   final_norm_, lm_head_, *gpu_final_norm_,
@@ -763,7 +791,7 @@ std::vector<int> Generator::generate(const std::vector<int>& prompt,
         if (device_ == Device::GPU) {
 #if defined(STRATAKV_HAS_CUDA)
             embed_device(next, *gpu_embedding_input_);
-            last = forward(*gpu_embedding_input_);
+            forward_into(*gpu_embedding_input_, last);
 #endif
         } else {
             last = forward(embed(&next, 1));

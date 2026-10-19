@@ -9,8 +9,10 @@ namespace stratakv {
 namespace layers {
 
 // Y = X * W^T + bias.
-// X is [tokens, input_dim]. The stored physical weight is [input_dim,
-// output_dim], which is W^T and can be passed directly to GEMM as B.
+// X is [tokens, input_dim]. The logical weight is [input_dim,
+// output_dim], which is W^T and can be passed directly to GEMM as B. GPU BF16
+// checkpoint weights may use a transpose view over physical [output,input]
+// rows, so callers must respect weight().strides() rather than assuming storage.
 class Linear {
 public:
     Linear(std::size_t input_dim,
@@ -33,7 +35,7 @@ public:
 
     void to(Device device);
 
-    // The returned weight is the physical transposed/GEMM-ready tensor.
+    // The returned weight is logically transposed/GEMM-ready; respect strides.
     Tensor&       weight()       noexcept { return weight_; }
     const Tensor& weight() const noexcept { return weight_; }
 
@@ -50,7 +52,7 @@ public:
 private:
     std::size_t input_dim_;
     std::size_t output_dim_;
-    Tensor weight_;              // [input_dim, output_dim] = W^T
+    Tensor weight_;              // Logical [input_dim, output_dim] = W^T
     std::optional<Tensor> bias_; // [output_dim], when enabled
 };
 

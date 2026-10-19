@@ -13,10 +13,27 @@ MESSAGES = [
 ]
 MAX_NEW_TOKENS = 500
 
+
+def find_cli(repository_root: Path) -> Path:
+    candidates = (
+        repository_root / "build" / "Release" / "stratakv_cli.exe",
+        repository_root / "build" / "Release" / "stratakv_cli",
+        repository_root / "build" / "stratakv_cli.exe",
+        repository_root / "build" / "stratakv_cli",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    expected = ", ".join(str(path) for path in candidates)
+    raise FileNotFoundError(f"stratakv_cli was not found; checked: {expected}")
+
+
 def main():
     repository_root = Path(__file__).resolve().parent
-    model_path = "E:\\My Folder\\Mourya folder\\Projects\\StrataKV\\model.safetensors"
-    cli_path = repository_root / "build-phase9-cuda" / "Release" / "stratakv_cli.exe"
+    model_path = repository_root / "model.safetensors"
+    if not model_path.is_file():
+        raise FileNotFoundError(f"model file not found: {model_path}")
+    cli_path = find_cli(repository_root)
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     raw_prompt_data = tokenizer.apply_chat_template(MESSAGES, add_generation_prompt=True, return_dict=True)
@@ -35,7 +52,7 @@ def main():
         *(str(tid) for tid in prompt_ids)
     ]
 
-    print(f"Benckmarking StrataKV Engine (Target: {MAX_NEW_TOKENS} tokens)...")
+    print(f"Benchmarking StrataKV Engine (Target: {MAX_NEW_TOKENS} tokens)...")
     
     start_time = time.perf_counter()
     

@@ -29,6 +29,14 @@
 namespace stratakv::io {
 namespace {
 constexpr std::size_t kParallelThreshold = 4u * 1024u * 1024u;
+constexpr std::size_t kF16ParallelThreshold = 1024u * 1024u;
+// Match the loader's existing parallel_for bound. hardware_concurrency() can
+// report hundreds of logical CPUs on Windows hosts; spawning that many workers
+// for a memory-bandwidth-bound decode is slower than a bounded worker set.
+constexpr std::size_t kMaxDecodeThreads = 8u;
+
+std::uint16_t le16(const unsigned char* p) noexcept;
+float half_to_float(std::uint16_t value) noexcept;
 
 template <typename Function>
 void parallel_for(std::size_t count, Function function) {
@@ -48,6 +56,81 @@ void parallel_for(std::size_t count, Function function) {
     }
     for (auto& thread : threads)
         thread.join();
+}
+
+void decode_f16_range(const unsigned char* source, float* destination,
+                      std::size_t begin, std::size_t end) noexcept {
+    for (std::size_t i = begin; i < end; ++i)
+        destination[i] = half_to_float(le16(source + 2u * i));
+}
+
+void decode_f16(const unsigned char* source, float* destination,
+                std::size_t count) {
+    const unsigned hardware_threads = std::thread::hardware_concurrency();
+    if (count < kF16ParallelThreshold || hardware_threads < 2) {
+        decode_f16_range(source, destination, 0, count);
+        return;
+    }
+
+    // Each worker owns a disjoint element range. The mapped source is read-only
+    // and the destination was fully allocated before any worker starts.
+    const std::size_t thread_count = (std::min)(
+        kMaxDecodeThreads, static_cast<std::size_t>(hardware_threads));
+    const std::size_t chunk =
+        (count + thread_count - 1u) / thread_count;
+    std::vector<std::thread> workers;
+    workers.reserve(thread_count);
+    try {
+        for (std::size_t begin = 0; begin < count; begin += chunk) {
+            const std::size_t end = (std::min)(count, begin + chunk);
+            workers.emplace_back(decode_f16_range, source, destination,
+                                 begin, end);
+        }
+    } catch (...) {
+        for (auto& worker : workers)
+            worker.join();
+        throw;
+    }
+    for (auto& worker : workers)
+        worker.join();
+}
+
+void decode_bf16_range(const unsigned char* source, float* destination,
+                       std::size_t begin, std::size_t end) noexcept {
+    for (std::size_t i = begin; i < end; ++i) {
+        const std::uint16_t value = le16(source + 2u * i);
+        const std::uint32_t bits = static_cast<std::uint32_t>(value) << 16u;
+        std::memcpy(destination + i, &bits, sizeof(bits));
+    }
+}
+
+void decode_bf16(const unsigned char* source, float* destination,
+                 std::size_t count) {
+    const unsigned hardware_threads = std::thread::hardware_concurrency();
+    if (count < kF16ParallelThreshold || hardware_threads < 2) {
+        decode_bf16_range(source, destination, 0, count);
+        return;
+    }
+
+    const std::size_t thread_count = (std::min)(
+        kMaxDecodeThreads, static_cast<std::size_t>(hardware_threads));
+    const std::size_t chunk =
+        (count + thread_count - 1u) / thread_count;
+    std::vector<std::thread> workers;
+    workers.reserve(thread_count);
+    try {
+        for (std::size_t begin = 0; begin < count; begin += chunk) {
+            const std::size_t end = (std::min)(count, begin + chunk);
+            workers.emplace_back(decode_bf16_range, source, destination,
+                                 begin, end);
+        }
+    } catch (...) {
+        for (auto& worker : workers)
+            worker.join();
+        throw;
+    }
+    for (auto& worker : workers)
+        worker.join();
 }
 
 [[noreturn]] void fail(const std::string& reason) {
@@ -489,17 +572,18 @@ WeightMap load_safetensors(const std::filesystem::path& path,
         }
         const DataType dtype = DataType::FP32;
         Tensor converted(e.shape, dtype);
-        parallel_for(e.count, [&](std::size_t begin, std::size_t end) {
-            for (std::size_t i = begin; i < end; ++i) {
-                float value = 0.0f;
-                if (is_f16) {
-                    value = half_to_float(le16(source + 2 * i));
-                } else if (is_bf16) {
-                    const std::uint16_t bf16 = le16(source + 2 * i);
-                    const std::uint32_t bits =
-                        static_cast<std::uint32_t>(bf16) << 16u;
-                    std::memcpy(&value, &bits, sizeof(value));
-                } else {
+        if (is_f16) {
+            // F16 checkpoints dominate load time. Decode directly into the
+            // fully allocated FP32 tensor using disjoint worker ranges.
+            decode_f16(source, converted.data(), e.count);
+        } else if (is_bf16) {
+            // BF16 checkpoints use the same bounded worker architecture. The
+            // mapped source and FP32 destination ranges are disjoint per worker.
+            decode_bf16(source, converted.data(), e.count);
+        } else {
+            parallel_for(e.count, [&](std::size_t begin, std::size_t end) {
+                for (std::size_t i = begin; i < end; ++i) {
+                    float value = 0.0f;
                     std::uint32_t bits =
                         static_cast<std::uint32_t>(source[4 * i]) |
                         (static_cast<std::uint32_t>(source[4 * i + 1]) << 8) |
@@ -511,10 +595,10 @@ WeightMap load_safetensors(const std::filesystem::path& path,
                             ((bits & 0x00ff0000u) >> 8u) |
                             ((bits & 0xff000000u) >> 24u);
                     std::memcpy(&value, &bits, sizeof(value));
+                    converted[i] = value;
                 }
-                converted[i] = value;
-            }
-        });
+            });
+        }
         result.emplace(e.name, std::move(converted));
     }
     g_last_load_breakdown.tensor_decode_ms =

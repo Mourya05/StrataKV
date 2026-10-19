@@ -140,8 +140,28 @@ Tensor& Tensor::operator=(Tensor&& other) noexcept {
     return *this;
 }
 
+Tensor::Tensor(const Tensor& source, AliasTag)
+    : data_ptr_(source.data_ptr_), device_(source.device_), dtype_(source.dtype_),
+      total_elements_(source.total_elements_), shape_(source.shape_),
+      strides_(source.strides_), owner_(source.owner_) {}
+
+Tensor Tensor::transpose_2d() const {
+    if (ndim() != 2 || dtype_ != DataType::BF16 || !owner_)
+        throw std::invalid_argument("Tensor::transpose_2d: expected a BF16 matrix");
+    Tensor view(*this, AliasTag{});
+    std::swap(view.shape_[0], view.shape_[1]);
+    std::swap(view.strides_[0], view.strides_[1]);
+    return view;
+}
+
+std::size_t Tensor::storage_index(std::size_t i) const noexcept {
+    if (is_contiguous()) return i;
+    return (i / shape_[1]) * strides_[0] + (i % shape_[1]) * strides_[1];
+}
+
 Tensor Tensor::to(Device target) const {
     Tensor result(shape_, dtype_, target);
+    result.strides_ = strides_; // Copy the physical buffer and its layout.
     const std::size_t bytes = total_elements_ * element_size();
     if (bytes == 0) return result;
 
@@ -173,6 +193,7 @@ Tensor Tensor::to(Device target) const {
 float Tensor::value_at(std::size_t i) const {
     if (device_ != Device::CPU)
         throw std::runtime_error("Tensor: GPU tensor requires to(Device::CPU)");
+    i = storage_index(i);
     if (dtype_ == DataType::FP32)
         return static_cast<const float*>(data_ptr_)[i];
 
@@ -188,6 +209,7 @@ float Tensor::value_at(std::size_t i) const {
 void Tensor::set_value(std::size_t i, float value) {
     if (device_ != Device::CPU)
         throw std::runtime_error("Tensor: GPU tensor requires to(Device::CPU)");
+    i = storage_index(i);
     if (dtype_ == DataType::FP32) {
         static_cast<float*>(data_ptr_)[i] = value;
         return;
@@ -215,7 +237,9 @@ std::size_t Tensor::get_flat_index(const std::vector<std::size_t>& idx) const {
         if (idx[i] >= shape_[i])
             throw std::out_of_range("Tensor: index at dimension " + std::to_string(i));
 #endif
-        flat += idx[i] * strides_[i];
+        // operator[] consumes a logical row-major flat index, including for
+        // transposed BF16 views; storage_index translates it to physical bytes.
+        flat = flat * shape_[i] + idx[i];
     }
     return flat;
 }

@@ -32,6 +32,8 @@ void copy_device(const void* source, void* target, std::size_t bytes,
 }
 
 std::vector<float> host_values(const Tensor& tensor) {
+    if (!tensor.is_contiguous() && tensor.device() == Device::GPU)
+        return host_values(tensor.to(Device::CPU));
     std::vector<float> values(tensor.num_elements());
     if (tensor.device() == Device::CPU) {
         for (std::size_t i = 0; i < values.size(); ++i)
@@ -284,23 +286,90 @@ Tensor TransformerBlock::forward(const Tensor& hidden_states,
 
 #if defined(STRATAKV_HAS_CUDA)
     if (hidden_states.device() == Device::GPU) {
+        Tensor result({1, hidden_dim_}, DataType::FP32, Device::GPU);
+        forward_into(hidden_states, result, seq_id, page_table, block_pool,
+                     append_tokens);
+        return result;
+    }
+#else
+    if (hidden_states.device() == Device::GPU) {
+        throw std::runtime_error(
+            "TransformerBlock::forward: GPU tensors require CUDA support");
+    }
+#endif
+
+    // H = X + Attention(RMSNorm(X))
+    Tensor normalized_input = norm1_.forward(hidden_states);
+    Tensor attention_output = attention_.forward(
+        normalized_input, seq_id, page_table, block_pool, append_tokens);
+    Tensor attention_residual({hidden_states.shape()[0], hidden_dim_});
+    const std::size_t element_count = hidden_states.num_elements();
+    for (std::size_t i = 0; i < element_count; ++i) {
+        attention_residual[i] = hidden_states[i] + attention_output[i];
+    }
+
+    // X_out = H + down_proj(SiLU(gate_proj(RMSNorm(H))) * up_proj(RMSNorm(H))).
+    Tensor normalized_residual = norm2_.forward(attention_residual);
+    Tensor gate = gate_proj_.forward(normalized_residual);
+    Tensor up = up_proj_.forward(normalized_residual);
+    for (std::size_t i = 0; i < gate.num_elements(); ++i) {
+        const float value = gate[i];
+        // This form avoids exp overflow for large negative gate values while
+        // remaining mathematically equivalent to x / (1 + exp(-x)).
+        const float sigmoid = value >= 0.0f
+            ? 1.0f / (1.0f + std::exp(-value))
+            : std::exp(value) / (1.0f + std::exp(value));
+        gate[i] = value * sigmoid * up[i];
+    }
+
+    Tensor ffn_output = down_proj_.forward(gate);
+    Tensor output({hidden_states.shape()[0], hidden_dim_});
+    for (std::size_t i = 0; i < element_count; ++i) {
+        output[i] = attention_residual[i] + ffn_output[i];
+    }
+
+    return output;
+}
+
+void TransformerBlock::forward_into(
+    const Tensor& hidden_states, Tensor& output, int seq_id,
+    memory::PageTable& page_table, memory::BlockPool& block_pool,
+    bool append_tokens) {
+    if (hidden_states.ndim() != 2 ||
+        hidden_states.shape()[1] != hidden_dim_ ||
+        output.device() != hidden_states.device() ||
+        output.shape() != hidden_states.shape() ||
+        output.dtype() != DataType::FP32) {
+        throw std::invalid_argument(
+            "TransformerBlock::forward_into: output shape or device mismatch");
+    }
+#if defined(STRATAKV_HAS_CUDA)
+    if (output.device() == Device::GPU) {
         if (hidden_states.shape()[0] != 1) {
             throw std::invalid_argument(
-                "TransformerBlock::forward: GPU decode requires one token");
+                "TransformerBlock::forward_into: GPU decode requires one token");
         }
-        if (hidden_states.dtype() != DataType::FP32) throw std::runtime_error("Migration failed: hidden_states is not FP32");
-        if (norm1_.gamma().dtype() != DataType::FP32) throw std::runtime_error("Migration failed: norm1 gamma is not FP32");
-        if (norm2_.gamma().dtype() != DataType::FP32) throw std::runtime_error("Migration failed: norm2 gamma is not FP32");
-
-        if (norm1_.gamma().device() != Device::GPU) throw std::runtime_error("Migration failed: norm1 is still on CPU");
-        if (norm2_.gamma().device() != Device::GPU) throw std::runtime_error("Migration failed: norm2 is still on CPU");
-        if (attention_.query_projection().weight().device() != Device::GPU) throw std::runtime_error("Migration failed: q_proj is still on CPU");
-        if (attention_.key_projection().weight().device() != Device::GPU) throw std::runtime_error("Migration failed: k_proj is still on CPU");
-        if (attention_.value_projection().weight().device() != Device::GPU) throw std::runtime_error("Migration failed: v_proj is still on CPU");
-        if (attention_.output_projection().weight().device() != Device::GPU) throw std::runtime_error("Migration failed: out_proj is still on CPU");
-        if (gate_proj_.weight().device() != Device::GPU) throw std::runtime_error("Migration failed: gate_proj is still on CPU");
-        if (up_proj_.weight().device() != Device::GPU) throw std::runtime_error("Migration failed: up_proj is still on CPU");
-        if (down_proj_.weight().device() != Device::GPU) throw std::runtime_error("Migration failed: down_proj is still on CPU");
+        if (hidden_states.dtype() != DataType::FP32) {
+            throw std::runtime_error(
+                "TransformerBlock::forward_into: hidden_states is not FP32");
+        }
+        if (norm1_.gamma().dtype() != DataType::FP32 ||
+            norm2_.gamma().dtype() != DataType::FP32 ||
+            norm1_.gamma().device() != Device::GPU ||
+            norm2_.gamma().device() != Device::GPU) {
+            throw std::runtime_error(
+                "TransformerBlock::forward_into: RMSNorm weights are not on GPU");
+        }
+        if (attention_.query_projection().weight().device() != Device::GPU ||
+            attention_.key_projection().weight().device() != Device::GPU ||
+            attention_.value_projection().weight().device() != Device::GPU ||
+            attention_.output_projection().weight().device() != Device::GPU ||
+            gate_proj_.weight().device() != Device::GPU ||
+            up_proj_.weight().device() != Device::GPU ||
+            down_proj_.weight().device() != Device::GPU) {
+            throw std::runtime_error(
+                "TransformerBlock::forward_into: projection weights are not on GPU");
+        }
         if (block_pool.device() != Device::GPU ||
             block_pool.key_cache() == nullptr ||
             block_pool.value_cache() == nullptr ||
@@ -309,19 +378,19 @@ Tensor TransformerBlock::forward(const Tensor& hidden_states,
             block_pool.head_dim() !=
                 static_cast<int>(attention_.head_dim())) {
             throw std::invalid_argument(
-                "TransformerBlock::forward: GPU BlockPool configuration does "
+                "TransformerBlock::forward_into: GPU BlockPool configuration does "
                 "not match attention");
         }
         if (!page_table.has_sequence(seq_id)) {
             throw std::runtime_error(
-                "TransformerBlock::forward: seq_id is not registered");
+                "TransformerBlock::forward_into: seq_id is not registered");
         }
 
         const memory::SequenceState& initial_state =
             page_table.get_state(seq_id);
         if (initial_state.sequence_length <= 0 && !append_tokens) {
             throw std::invalid_argument(
-                "TransformerBlock::forward: cannot decode without context");
+                "TransformerBlock::forward_into: cannot decode without context");
         }
         const int logical_position = initial_state.sequence_length;
         if (append_tokens)
@@ -346,9 +415,10 @@ Tensor TransformerBlock::forward(const Tensor& hidden_states,
             !key_workspace_ || !value_workspace_ || !cos_workspace_ ||
             !sin_workspace_ || !context_workspace_ ||
             !normalized_residual_workspace_ || !gate_workspace_ ||
-            !up_workspace_ || !down_workspace_)
+            !up_workspace_ || !down_workspace_) {
             throw std::runtime_error(
-                "TransformerBlock::forward: GPU workspace is not initialized");
+                "TransformerBlock::forward_into: GPU workspace is not initialized");
+        }
         Tensor& normalized_input = *normalized_input_workspace_;
         Tensor& queries = *query_workspace_;
         Tensor& keys = *key_workspace_;
@@ -358,6 +428,7 @@ Tensor TransformerBlock::forward(const Tensor& hidden_states,
         Tensor& gate = *gate_workspace_;
         Tensor& up = *up_workspace_;
         Tensor& down = *down_workspace_;
+
         rmsnorm_cuda(
             static_cast<const float*>(hidden_states.raw_data()),
             static_cast<float*>(normalized_input.raw_data()),
@@ -416,7 +487,7 @@ Tensor TransformerBlock::forward(const Tensor& hidden_states,
             static_cast<std::size_t>(page_index) >=
                 state.physical_blocks.size()) {
             throw std::runtime_error(
-                "TransformerBlock::forward: no KV page for decode position");
+                "TransformerBlock::forward_into: no KV page for decode position");
         }
         const int physical_block = state.physical_blocks[page_index];
         const std::size_t token_stride =
@@ -427,14 +498,12 @@ Tensor TransformerBlock::forward(const Tensor& hidden_states,
                  static_cast<std::size_t>(block_size) +
              static_cast<std::size_t>(slot)) * token_stride;
         copy_device(
-            keys.raw_data(),
-            block_pool.key_cache() + cache_offset,
+            keys.raw_data(), block_pool.key_cache() + cache_offset,
             static_cast<std::size_t>(num_kv_heads) *
                 static_cast<std::size_t>(head_dim) * sizeof(float),
             "key-cache append");
         copy_device(
-            values.raw_data(),
-            block_pool.value_cache() + cache_offset,
+            values.raw_data(), block_pool.value_cache() + cache_offset,
             static_cast<std::size_t>(num_kv_heads) *
                 static_cast<std::size_t>(head_dim) * sizeof(float),
             "value-cache append");
@@ -462,9 +531,10 @@ Tensor TransformerBlock::forward(const Tensor& hidden_states,
             parity_out_proj = cpu_matmul(
                 parity_context, hidden_dim_,
                 attention_.output_projection().weight());
-            parity_report("out_proj", host_values(down),
-                          parity_out_proj);
+            parity_report("out_proj", host_values(down), parity_out_proj);
         }
+        // Do not overwrite output until every read from hidden_states is done;
+        // Generator intentionally supports input/output aliasing here.
         add_inplace_cuda(static_cast<float*>(down.raw_data()),
                          static_cast<const float*>(hidden_states.raw_data()),
                          static_cast<int>(hidden_dim_));
@@ -521,76 +591,25 @@ Tensor TransformerBlock::forward(const Tensor& hidden_states,
         add_inplace_cuda(static_cast<float*>(down.raw_data()),
                          static_cast<const float*>(context.raw_data()),
                          static_cast<int>(hidden_dim_));
-        Tensor result({1, hidden_dim_}, DataType::FP32, Device::GPU);
-        copy_device(down.raw_data(), result.raw_data(),
+
+        // The caller owns output.  This is the only final copy and does not
+        // allocate; it also keeps input/output aliasing safe because all reads
+        // from hidden_states completed above.
+        copy_device(down.raw_data(), output.raw_data(),
                     hidden_dim_ * sizeof(float), "transformer output");
-        return result;
-    }
-#else
-    if (hidden_states.device() == Device::GPU) {
-        throw std::runtime_error(
-            "TransformerBlock::forward: GPU tensors require CUDA support");
+        return;
     }
 #endif
-
-    // H = X + Attention(RMSNorm(X))
-    Tensor normalized_input = norm1_.forward(hidden_states);
-    Tensor attention_output = attention_.forward(
-        normalized_input, seq_id, page_table, block_pool, append_tokens);
-    Tensor attention_residual({hidden_states.shape()[0], hidden_dim_});
-    const std::size_t element_count = hidden_states.num_elements();
-    for (std::size_t i = 0; i < element_count; ++i) {
-        attention_residual[i] = hidden_states[i] + attention_output[i];
-    }
-
-    // X_out = H + down_proj(SiLU(gate_proj(RMSNorm(H))) * up_proj(RMSNorm(H))).
-    Tensor normalized_residual = norm2_.forward(attention_residual);
-    Tensor gate = gate_proj_.forward(normalized_residual);
-    Tensor up = up_proj_.forward(normalized_residual);
-    for (std::size_t i = 0; i < gate.num_elements(); ++i) {
-        const float value = gate[i];
-        // This form avoids exp overflow for large negative gate values while
-        // remaining mathematically equivalent to x / (1 + exp(-x)).
-        const float sigmoid = value >= 0.0f
-            ? 1.0f / (1.0f + std::exp(-value))
-            : std::exp(value) / (1.0f + std::exp(value));
-        gate[i] = value * sigmoid * up[i];
-    }
-
-    Tensor ffn_output = down_proj_.forward(gate);
-    Tensor output({hidden_states.shape()[0], hidden_dim_});
-    for (std::size_t i = 0; i < element_count; ++i) {
-        output[i] = attention_residual[i] + ffn_output[i];
-    }
-
-    return output;
-}
-
-void TransformerBlock::forward_into(
-    const Tensor& hidden_states, Tensor& output, int seq_id,
-    memory::PageTable& page_table, memory::BlockPool& block_pool,
-    bool append_tokens) {
-    if (output.device() != hidden_states.device() ||
-        output.shape() != hidden_states.shape() ||
-        output.dtype() != DataType::FP32) {
-        throw std::invalid_argument(
-            "TransformerBlock::forward_into: output shape or device mismatch");
-    }
-    Tensor computed = forward(hidden_states, seq_id, page_table, block_pool,
-                              append_tokens);
+#if !defined(STRATAKV_HAS_CUDA)
     if (output.device() == Device::GPU) {
-#if defined(STRATAKV_HAS_CUDA)
-        copy_device(computed.raw_data(), output.raw_data(),
-                    computed.num_elements() * sizeof(float),
-                    "transformer output");
-#else
         throw std::runtime_error(
             "TransformerBlock::forward_into: GPU requires CUDA support");
-#endif
-    } else {
-        for (std::size_t i = 0; i < output.num_elements(); ++i)
-            output[i] = computed[i];
     }
+#endif
+    Tensor computed = forward(hidden_states, seq_id, page_table, block_pool,
+                              append_tokens);
+    for (std::size_t i = 0; i < output.num_elements(); ++i)
+        output[i] = computed[i];
 }
 
 } // namespace models

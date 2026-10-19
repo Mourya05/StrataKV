@@ -213,5 +213,29 @@ const int* PageTable::get_device_block_table(int seq_id) {
 #endif
 }
 
+void PageTable::reserve_device_block_table(std::size_t capacity) {
+#if defined(STRATAKV_HAS_CUDA)
+    if (capacity <= d_block_table_capacity_)
+        return;
+    if (capacity > (std::numeric_limits<std::size_t>::max)() /
+            sizeof(int)) {
+        throw std::overflow_error(
+            "reserve_device_block_table: capacity is too large");
+    }
+
+    int* replacement = nullptr;
+    check_cuda(cudaMalloc(reinterpret_cast<void**>(&replacement),
+                          capacity * sizeof(int)),
+               "cudaMalloc(block_table reserve)");
+    if (d_block_table_ != nullptr)
+        (void)cudaFree(d_block_table_);
+    d_block_table_ = replacement;
+    d_block_table_capacity_ = capacity;
+    device_table_dirty_ = true;
+#else
+    (void)capacity;
+#endif
+}
+
 } // namespace memory
 } // namespace stratakv

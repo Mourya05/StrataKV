@@ -21,9 +21,11 @@
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
+#include <algorithm>
 #include <cmath>
 #include <cfloat>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <cstring>     // memcmp
 #include <type_traits>
@@ -35,6 +37,11 @@ namespace stratakv {
 // ---------------------------------------------------------------------------
 static constexpr int TILE = 32;   // thread-block edge length
 static constexpr int ELEMENTWISE_THREADS = 256;
+static constexpr int GEMV_WARP_SIZE = 32;
+static constexpr int GEMV_WARPS = 8;
+static constexpr int GEMV_VECTOR_WIDTH = 8;
+static constexpr int GEMV_K_TILE = GEMV_WARP_SIZE * GEMV_VECTOR_WIDTH;
+static constexpr int GEMV_THREADS = GEMV_WARP_SIZE * GEMV_WARPS;
 
 __global__ void transpose_fp32_to_bf16_kernel(
     const float* __restrict__ source, std::uint16_t* __restrict__ destination,
@@ -62,6 +69,17 @@ __global__ void transpose_fp32_to_bf16_kernel(
     if (destination_row < cols && destination_col < rows)
         destination[destination_row * rows + destination_col] =
             tile[threadIdx.x][threadIdx.y];
+}
+
+__global__ void convert_fp32_to_bf16_kernel(
+    const float* __restrict__ source, std::uint16_t* __restrict__ destination,
+    std::size_t count) {
+    for (std::size_t i = static_cast<std::size_t>(blockIdx.x) * blockDim.x +
+             threadIdx.x; i < count;
+         i += static_cast<std::size_t>(blockDim.x) * gridDim.x) {
+        // Match the existing checkpoint transpose converter's BF16 truncation.
+        destination[i] = static_cast<std::uint16_t>(__float_as_uint(source[i]) >> 16u);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -425,9 +443,10 @@ __device__ float activation_to_float(__nv_bfloat16 value) {
 
 template <typename Activation>
 __global__ void gemm_bf16_weight_kernel(const Activation* __restrict__ A,
-                                        const __nv_bfloat16* __restrict__ B,
-                                        float* __restrict__ C,
-                                        int M, int N, int K)
+                                         const __nv_bfloat16* __restrict__ B,
+                                         float* __restrict__ C,
+                                         int M, int N, int K,
+                                         bool output_major)
 {
     __shared__ Activation As[TILE][TILE];
     __shared__ __nv_bfloat16 Bs[TILE][TILE];
@@ -470,7 +489,14 @@ __global__ void gemm_bf16_weight_kernel(const Activation* __restrict__ A,
         }
 
         const int b_row = t * TILE + static_cast<int>(threadIdx.y);
-        if (b_row < K && col + 1 < N && (N % 2) == 0) {
+        if (output_major) {
+            Bs[threadIdx.y][local_col] = (b_row < K && col < N)
+                ? B[static_cast<std::size_t>(col) * K + b_row]
+                : __float2bfloat16(0.0f);
+            Bs[threadIdx.y][local_col + 1] = (b_row < K && col + 1 < N)
+                ? B[static_cast<std::size_t>(col + 1) * K + b_row]
+                : __float2bfloat16(0.0f);
+        } else if (b_row < K && col + 1 < N && (N % 2) == 0) {
             const __nv_bfloat162 pair = *reinterpret_cast<const __nv_bfloat162*>(
                 B + b_row * N + col);
             Bs[threadIdx.y][local_col] = pair.x;
@@ -498,34 +524,115 @@ __global__ void gemm_bf16_weight_kernel(const Activation* __restrict__ A,
     if (row < M && col + 1 < N) C[row * N + col + 1] = acc1;
 }
 
+// One uint4 contains eight BF16 values. Unrolled callers keep all unpacking
+// in registers, converting the original BF16 bits without re-quantizing A.
+__device__ __forceinline__ float packed_bf16_value(uint4 packed, int index) {
+    const unsigned int words[4] = {packed.x, packed.y, packed.z, packed.w};
+    const unsigned short bits = static_cast<unsigned short>(
+        words[index / 2] >> ((index % 2) * 16));
+    return __bfloat162float(__ushort_as_bfloat16(bits));
+}
+
+template <typename Activation>
+__device__ __forceinline__ void load_activation_eight(
+    const Activation* input, float (&values)[GEMV_VECTOR_WIDTH]) {
+    if constexpr (std::is_same<Activation, __nv_bfloat16>::value) {
+        const uint4 packed = *reinterpret_cast<const uint4*>(input);
+        #pragma unroll
+        for (int i = 0; i < GEMV_VECTOR_WIDTH; ++i)
+            values[i] = packed_bf16_value(packed, i);
+    } else {
+        // FP32 activations must stay FP32: eight floats require two 128-bit
+        // loads, rather than interpreting their bits as eight BF16 values.
+        const float4 first = *reinterpret_cast<const float4*>(input);
+        const float4 second = *reinterpret_cast<const float4*>(input + 4);
+        values[0] = first.x;
+        values[1] = first.y;
+        values[2] = first.z;
+        values[3] = first.w;
+        values[4] = second.x;
+        values[5] = second.y;
+        values[6] = second.z;
+        values[7] = second.w;
+    }
+}
+
 template <typename Activation>
 __global__ void gemv_bf16_weight_kernel(const Activation* __restrict__ A,
                                         const __nv_bfloat16* __restrict__ B,
                                         float* __restrict__ C, int N, int K)
 {
+    const int thread = static_cast<int>(threadIdx.x);
+    const int warp_id = thread / GEMV_WARP_SIZE;
+    const int lane_id = thread % GEMV_WARP_SIZE;
+    const int n = static_cast<int>(blockIdx.x) * GEMV_WARPS + warp_id;
+    if (n >= N)
+        return; // Whole warps exit; every active reduction has all 32 lanes.
+
+    float sum = 0.0f;
+    // Logical B=[K,N] is a transpose view over physical [N,K] rows. This
+    // layout is prepared at model initialization, never inside the token loop.
+    const __nv_bfloat16* row = B + static_cast<std::size_t>(n) * K;
+    int tail_start = 0;
+    const int vector_end = K - K % GEMV_K_TILE;
+    const bool aligned_input =
+        (reinterpret_cast<std::uintptr_t>(A) % alignof(uint4)) == 0;
+    const bool aligned_weights =
+        (reinterpret_cast<std::uintptr_t>(row) % alignof(uint4)) == 0;
+
+    if (aligned_input && aligned_weights) {
+        for (int base = 0; base < vector_end; base += GEMV_K_TILE) {
+            const int k = base + lane_id * GEMV_VECTOR_WIDTH;
+            const uint4 packed = *reinterpret_cast<const uint4*>(row + k);
+            float input[GEMV_VECTOR_WIDTH];
+            load_activation_eight(A + k, input);
+            #pragma unroll
+            for (int i = 0; i < GEMV_VECTOR_WIDTH; ++i)
+                sum += input[i] * packed_bf16_value(packed, i);
+        }
+        tail_start = vector_end;
+    }
+
+    // K%256 is covered exactly once, including K<256. For K not divisible by
+    // eight some [N,K] rows are misaligned: those warps scalar-load all of K.
+    // There are no block barriers, so partial eight-output blocks are safe.
+    for (std::size_t k = static_cast<std::size_t>(tail_start) + lane_id;
+         k < static_cast<std::size_t>(K); k += GEMV_WARP_SIZE) {
+        sum += activation_to_float(A[k]) * __bfloat162float(row[k]);
+    }
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1)
+        sum += __shfl_down_sync(0xffffffffu, sum, offset);
+    if (lane_id == 0)
+        C[n] = sum;
+}
+
+// Compatibility for callers supplying ordinary contiguous [K,N] weights.
+// Keep its coalesced-column traversal rather than silently reading B as [N,K]
+// or transposing/allocating at each call. Model decode uses the kernel above.
+template <typename Activation>
+__global__ void gemv_bf16_strided_weight_kernel(
+    const Activation* __restrict__ A, const __nv_bfloat16* __restrict__ B,
+    float* __restrict__ C, int N, int K) {
     extern __shared__ float input[];
     const int thread = static_cast<int>(threadIdx.x);
     for (int k = thread; k < K; k += static_cast<int>(blockDim.x))
         input[k] = activation_to_float(A[k]);
     __syncthreads();
-
-    const int col = static_cast<int>(blockIdx.x) *
-        static_cast<int>(blockDim.x) + thread;
-    if (col >= N)
-        return;
-
+    const int n = static_cast<int>(blockIdx.x) * blockDim.x + thread;
+    if (n >= N) return;
     float sum = 0.0f;
     for (int k = 0; k < K; ++k)
-        sum += input[k] * __bfloat162float(B[k * N + col]);
-    C[col] = sum;
+        sum += input[k] * __bfloat162float(B[static_cast<std::size_t>(k) * N + n]);
+    C[n] = sum;
 }
 
 // ---------------------------------------------------------------------------
 //  matmul_cuda_tiled  --  Host wrapper
 //
 //  Tensor ownership and transfers are handled outside this wrapper. The
-//  persistent path only validates device pointers, launches the kernel, and
-//  synchronizes before returning with C resident in VRAM.
+//  persistent path validates inputs and launches against device pointers.
+//  C stays in VRAM; synchronization is optional via STRATAKV_SYNC_KERNELS=1.
 // ---------------------------------------------------------------------------
 void matmul_cuda_tiled(const Tensor& A, const Tensor& B, Tensor& C)
 {
@@ -537,6 +644,12 @@ void matmul_cuda_tiled(const Tensor& A, const Tensor& B, Tensor& C)
             "matmul_cuda_tiled: all tensors must be 2-D.");
     }
 
+    const std::size_t int_limit =
+        static_cast<std::size_t>((std::numeric_limits<int>::max)());
+    if (A.shape()[0] > int_limit || A.shape()[1] > int_limit ||
+        B.shape()[1] > int_limit) {
+        throw std::invalid_argument("matmul_cuda_tiled: dimensions exceed int range");
+    }
     const int M = static_cast<int>(A.shape()[0]);
     const int K = static_cast<int>(A.shape()[1]);
     const int N = static_cast<int>(B.shape()[1]);
@@ -573,6 +686,13 @@ void matmul_cuda_tiled(const Tensor& A, const Tensor& B, Tensor& C)
         throw std::invalid_argument(
             "matmul_cuda_tiled: BF16 GEMM requires the right input to be BF16");
     }
+    const bool output_major = B.dtype() == DataType::BF16 &&
+        B.strides()[0] == 1 && B.strides()[1] == static_cast<std::size_t>(K);
+    if (!A.is_contiguous() || !C.is_contiguous() ||
+        (!B.is_contiguous() && !output_major)) {
+        throw std::invalid_argument("matmul_cuda_tiled: unsupported matrix strides");
+    }
+    if (M == 0 || N == 0) return;
 
     // ------------------------------------------------------------------
     //  Launch directly against persistent Tensor-owned device pointers.
@@ -588,19 +708,36 @@ void matmul_cuda_tiled(const Tensor& A, const Tensor& B, Tensor& C)
         (static_cast<unsigned>(M) + TILE - 1) / TILE
     );
 
-    if (bf16_inputs && M == 1) {
-        const int threads = 256;
+    if (bf16_inputs && M == 1 && (output_major || N == 1)) {
         const dim3 gemv_grid(
-            (static_cast<unsigned>(N) + threads - 1) / threads);
+            (static_cast<unsigned>(N) + GEMV_WARPS - 1) / GEMV_WARPS);
         if (A.dtype() == DataType::BF16) {
             gemv_bf16_weight_kernel<__nv_bfloat16>
-                <<<gemv_grid, threads, static_cast<std::size_t>(K) * sizeof(float)>>>(
+                <<<gemv_grid, GEMV_THREADS, 0>>>(
                     static_cast<const __nv_bfloat16*>(A.raw_data()),
                     static_cast<const __nv_bfloat16*>(B.raw_data()),
                     static_cast<float*>(C.raw_data()), N, K);
         } else {
             gemv_bf16_weight_kernel<float>
-                <<<gemv_grid, threads, static_cast<std::size_t>(K) * sizeof(float)>>>(
+                <<<gemv_grid, GEMV_THREADS, 0>>>(
+                    static_cast<const float*>(A.raw_data()),
+                    static_cast<const __nv_bfloat16*>(B.raw_data()),
+                    static_cast<float*>(C.raw_data()), N, K);
+        }
+    } else if (bf16_inputs && M == 1) {
+        const dim3 strided_grid(
+            (static_cast<unsigned>(N) + ELEMENTWISE_THREADS - 1) /
+                ELEMENTWISE_THREADS);
+        const std::size_t shared_bytes = static_cast<std::size_t>(K) * sizeof(float);
+        if (A.dtype() == DataType::BF16) {
+            gemv_bf16_strided_weight_kernel<__nv_bfloat16>
+                <<<strided_grid, ELEMENTWISE_THREADS, shared_bytes>>>(
+                    static_cast<const __nv_bfloat16*>(A.raw_data()),
+                    static_cast<const __nv_bfloat16*>(B.raw_data()),
+                    static_cast<float*>(C.raw_data()), N, K);
+        } else {
+            gemv_bf16_strided_weight_kernel<float>
+                <<<strided_grid, ELEMENTWISE_THREADS, shared_bytes>>>(
                     static_cast<const float*>(A.raw_data()),
                     static_cast<const __nv_bfloat16*>(B.raw_data()),
                     static_cast<float*>(C.raw_data()), N, K);
@@ -615,12 +752,12 @@ void matmul_cuda_tiled(const Tensor& A, const Tensor& B, Tensor& C)
             gemm_bf16_weight_kernel<__nv_bfloat16><<<bf16_grid, bf16_block>>>(
                 static_cast<const __nv_bfloat16*>(A.raw_data()),
                 static_cast<const __nv_bfloat16*>(B.raw_data()),
-                static_cast<float*>(C.raw_data()), M, N, K);
+                static_cast<float*>(C.raw_data()), M, N, K, output_major);
         } else {
             gemm_bf16_weight_kernel<float><<<bf16_grid, bf16_block>>>(
                 static_cast<const float*>(A.raw_data()),
                 static_cast<const __nv_bfloat16*>(B.raw_data()),
-                static_cast<float*>(C.raw_data()), M, N, K);
+                static_cast<float*>(C.raw_data()), M, N, K, output_major);
         }
     } else {
         gemm_tiled_kernel<<<grid, block>>>(
@@ -642,6 +779,18 @@ void transpose_fp32_to_bf16_cuda(const float* d_src, std::uint16_t* d_dst,
         (static_cast<unsigned>(cols) + TILE - 1) / TILE,
         (static_cast<unsigned>(rows) + TILE - 1) / TILE);
     transpose_fp32_to_bf16_kernel<<<grid, block>>>(d_src, d_dst, rows, cols);
+    CUDA_CHECK_KERNEL();
+}
+
+void convert_fp32_to_bf16_cuda(const float* d_src, std::uint16_t* d_dst,
+                              std::size_t count) {
+    if (d_src == nullptr || d_dst == nullptr || count == 0)
+        throw std::invalid_argument(
+            "convert_fp32_to_bf16_cuda: invalid pointers or element count");
+    const unsigned blocks = static_cast<unsigned>((std::min)(
+        count / ELEMENTWISE_THREADS + (count % ELEMENTWISE_THREADS != 0),
+        std::size_t{65535}));
+    convert_fp32_to_bf16_kernel<<<blocks, ELEMENTWISE_THREADS>>>(d_src, d_dst, count);
     CUDA_CHECK_KERNEL();
 }
 

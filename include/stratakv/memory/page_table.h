@@ -90,6 +90,10 @@ public:
     // Copy the sequence's physical block IDs into a reusable GPU buffer.
     const int* get_device_block_table(int seq_id);
 
+    // Reserve the device-side table before decode starts so a sequence growing
+    // across a KV page boundary never allocates in the hot token loop.
+    void reserve_device_block_table(std::size_t capacity);
+
 private:
     void release_device_block_table() noexcept;
 

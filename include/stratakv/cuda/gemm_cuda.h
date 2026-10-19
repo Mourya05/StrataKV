@@ -6,12 +6,16 @@
 namespace stratakv {
 
 #if defined(STRATAKV_HAS_CUDA)
-// C = A * B for row-major matrices. GPU tensors are computed in place without
-// staging allocations or host/device transfers. All-CPU inputs are delegated
+// C = A * B. A/C are row-major; BF16 B may also be a transpose_2d() view over
+// output-major [N,K] storage for vectorized decode. GPU outputs are computed
+// in place without staging allocations or host/device transfers. CPU inputs are delegated
 // to the CPU GEMM for compatibility with existing callers.
 void matmul_cuda_tiled(const Tensor& A, const Tensor& B, Tensor& C);
 void transpose_fp32_to_bf16_cuda(const float* d_src, std::uint16_t* d_dst,
                                  int rows, int cols);
+// Initialization-only conversion, preserving checkpoint [N,K] storage order.
+void convert_fp32_to_bf16_cuda(const float* d_src, std::uint16_t* d_dst,
+                              std::size_t count);
 
 // Add a one-dimensional FP32 bias to every row of a GPU output tensor.
 void add_bias_cuda(Tensor& output, const Tensor& bias);

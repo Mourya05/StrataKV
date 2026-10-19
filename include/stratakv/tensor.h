@@ -38,9 +38,17 @@ public:
                                       DataType dtype);
 
     Device device() const noexcept { return device_; }
-    // Return an owning deep copy on the requested device. The source tensor
-    // remains unchanged, which makes failed transfers transactional.
+    // Return an owning deep copy on the requested device, preserving strides.
+    // The source remains unchanged, which makes failed transfers transactional.
     Tensor to(Device target) const;
+    // Shared-storage BF16 matrix transpose. This swaps shape/strides without
+    // copying weights, allowing logical [K,N] matrices backed by [N,K] rows.
+    // to(Device) preserves storage order; value_at uses logical flat indices.
+    Tensor transpose_2d() const;
+    bool is_contiguous() const noexcept {
+        return ndim() != 2 ||
+            (strides_[0] == shape_[1] && strides_[1] == 1);
+    }
     DataType dtype() const noexcept { return dtype_; }
     std::size_t element_size() const noexcept {
         return dtype_ == DataType::BF16 ? sizeof(std::uint16_t) : sizeof(float);
@@ -51,11 +59,11 @@ public:
     // Use raw_data() for CUDA kernels and operator[]/value_at() for converted
     // CPU scalar access.
     float* data() noexcept {
-        return device_ == Device::CPU && dtype_ == DataType::FP32
+        return device_ == Device::CPU && dtype_ == DataType::FP32 && is_contiguous()
             ? static_cast<float*>(data_ptr_) : nullptr;
     }
     const float* data() const noexcept {
-        return device_ == Device::CPU && dtype_ == DataType::FP32
+        return device_ == Device::CPU && dtype_ == DataType::FP32 && is_contiguous()
             ? static_cast<const float*>(data_ptr_) : nullptr;
     }
     void* raw_data() noexcept { return data_ptr_; }
@@ -64,6 +72,7 @@ public:
     const std::vector<std::size_t>& shape() const noexcept { return shape_; }
     const std::vector<std::size_t>& strides() const noexcept { return strides_; }
     std::size_t ndim() const noexcept { return shape_.size(); }
+    // Logical row-major flat index for use with operator[]/value_at.
     std::size_t get_flat_index(const std::vector<std::size_t>& idx) const;
 
     class ElementProxy {
@@ -92,11 +101,13 @@ public:
 
 private:
     struct AliasTag {};
+    Tensor(const Tensor& source, AliasTag);
     Tensor(const std::vector<std::size_t>& shape, float* data,
            std::shared_ptr<void> owner, AliasTag);
     Tensor(const std::vector<std::size_t>& shape, void* data,
            std::shared_ptr<void> owner, DataType dtype, AliasTag);
     void compute_strides();
+    std::size_t storage_index(std::size_t logical_index) const noexcept;
     void set_value(std::size_t i, float value);
     void* data_ptr_ = nullptr;
     Device device_ = Device::CPU;

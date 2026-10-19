@@ -1,1 +1,11 @@
 *.safetensors
+build/
+build-*/
+out/
+bin/
+*.obj
+*.exe
+*.lib
+*.pdb
+.vs/
+.vscode/

@@ -84,6 +84,10 @@ private:
     layers::Linear down_proj_;
     bool parity_diagnostic_ = false;
 #if defined(STRATAKV_HAS_CUDA)
+    // These workspaces are allocated once by to(Device::GPU) and reused by
+    // forward_into during token generation.  The block is intentionally not
+    // safe for concurrent requests; each in-flight request needs its own
+    // TransformerBlock instance (or workspace set).
     std::optional<Tensor> normalized_input_workspace_;
     std::optional<Tensor> query_workspace_;
     std::optional<Tensor> key_workspace_;

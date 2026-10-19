@@ -151,4 +151,26 @@ if(BUILD_TESTING)
     target_link_libraries(phase8_smoke PRIVATE stratakv)
     add_test(NAME phase8_smoke
              COMMAND phase8_smoke "${CMAKE_CURRENT_BINARY_DIR}")
+
+    add_executable(f16_load_smoke tests/f16_load_smoke.cpp)
+    target_link_libraries(f16_load_smoke PRIVATE stratakv)
+    add_test(NAME f16_load_smoke
+             COMMAND f16_load_smoke "${CMAKE_CURRENT_BINARY_DIR}")
+
+    if(STRATAKV_CUDA)
+        add_executable(gemv_smoke tests/gemv_smoke.cu)
+        target_link_libraries(gemv_smoke PRIVATE stratakv)
+        # Match the library's Release device flags for the local old-kernel
+        # benchmark; keep host double-reference arithmetic at default precision.
+        target_compile_options(gemv_smoke PRIVATE
+            $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Release>>:-O3>
+            $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Release>>:--use_fast_math>
+            $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Release>>:-Xptxas=-O3>
+        )
+        add_test(NAME gemv_smoke COMMAND gemv_smoke)
+        set_tests_properties(gemv_smoke PROPERTIES
+            SKIP_RETURN_CODE 77
+            TIMEOUT 150
+        )
+    endif()
 endif()

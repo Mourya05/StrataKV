@@ -1,0 +1,9 @@
+Act as a Principal C++ Systems Engineer.
+
+The previous parallelization for F16 was perfect, but the user's `model.safetensors` file is actually BF16. The engine is still taking 217 seconds to load because the BF16 to FP32 conversion path remains single-threaded.
+
+Task: Parallelize the `BF16 -> FP32` decoding loop in `src/io/safetensors.cpp`.
+
+Implementation Details:
+1. Apply the exact same multi-threading architecture you just built for F16 (worker thresholding at 1024*1024, chunking, max 8 workers) to the `BF16` tensor conversion branch.
+2. Ensure the BF16 workers read their disjoint memory ranges from the mapped file and write directly to their disjoint ranges in the pre-allocated FP32 destination `Tensor`.

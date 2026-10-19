@@ -22,9 +22,36 @@
 #include <stdexcept>
 #include <cstring>       // std::memset / std::memcpy
 #include <algorithm>     // std::min
+#include <cstdlib>       // posix_memalign / std::free
+#include <new>
+#ifdef _WIN32
 #include <malloc.h>      // _aligned_malloc / _aligned_free
+#endif
 
 namespace stratakv {
+
+namespace {
+
+void* allocate_aligned(std::size_t bytes) {
+#ifdef _WIN32
+    return _aligned_malloc(bytes, 64);
+#else
+    void* allocation = nullptr;
+    if (posix_memalign(&allocation, 64, bytes) != 0)
+        return nullptr;
+    return allocation;
+#endif
+}
+
+void release_aligned(void* allocation) noexcept {
+#ifdef _WIN32
+    _aligned_free(allocation);
+#else
+    std::free(allocation);
+#endif
+}
+
+} // namespace
 
 // ---------------------------------------------------------------------------
 //  Tuning constants
@@ -59,11 +86,11 @@ struct AlignedScratch {
     size_t sz  = 0;
 
     explicit AlignedScratch(size_t elems) : sz(elems) {
-        ptr = static_cast<float*>(_aligned_malloc(elems * sizeof(float), 64));
+        ptr = static_cast<float*>(allocate_aligned(elems * sizeof(float)));
         if (!ptr) throw std::bad_alloc();
         std::memset(ptr, 0, elems * sizeof(float));
     }
-    ~AlignedScratch() { if (ptr) _aligned_free(ptr); }
+    ~AlignedScratch() { if (ptr) release_aligned(ptr); }
 
     // Non-copyable, non-movable (local scratch only).
     AlignedScratch(const AlignedScratch&)            = delete;
