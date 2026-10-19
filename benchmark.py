@@ -74,13 +74,19 @@ def main():
         load_ms = total_time * 1000.0
         gen_ms = total_time * 1000.0
         tps = generated_count / total_time
+    model_load_seconds = load_ms / 1000.0
+    pure_decode_seconds = gen_ms / 1000.0
+    end_to_end_tps = (
+        generated_count / total_time if total_time > 0.0 else 0.0
+    )
 
     print("\n--- Benchmark Results ---")
     print(f"Total Wall Time:  {total_time:.2f} seconds")
-    print(f"Model Load Time:  {load_ms / 1000.0:.2f} seconds")
-    print(f"Generation Time:  {gen_ms / 1000.0:.2f} seconds")
+    print(f"Model Load Time (s):              {model_load_seconds:.2f}")
+    print(f"Pure Decode Time (s):             {pure_decode_seconds:.2f}")
     print(f"Tokens Generated: {generated_count}")
-    print(f"Pure Decode TPS:  {tps:.2f} tokens/sec")
+    print(f"Pure GPU Throughput (tokens/sec):  {tps:.2f}")
+    print(f"End-to-End Wall Throughput (tokens/sec): {end_to_end_tps:.2f}")
     print("-------------------------\n")
     
     print("Output Preview:")

@@ -36,6 +36,34 @@ namespace stratakv {
 static constexpr int TILE = 32;   // thread-block edge length
 static constexpr int ELEMENTWISE_THREADS = 256;
 
+__global__ void transpose_fp32_to_bf16_kernel(
+    const float* __restrict__ source, std::uint16_t* __restrict__ destination,
+    int rows, int cols)
+{
+    __shared__ std::uint16_t tile[TILE][TILE + 1];
+    const int source_row = static_cast<int>(blockIdx.y) * TILE +
+        static_cast<int>(threadIdx.y);
+    const int source_col = static_cast<int>(blockIdx.x) * TILE +
+        static_cast<int>(threadIdx.x);
+    if (source_row < rows && source_col < cols) {
+        const float value = source[source_row * cols + source_col];
+        const std::uint32_t bits = __float_as_uint(value);
+        tile[threadIdx.y][threadIdx.x] =
+            static_cast<std::uint16_t>(bits >> 16u);
+    } else {
+        tile[threadIdx.y][threadIdx.x] = 0;
+    }
+    __syncthreads();
+
+    const int destination_row = static_cast<int>(blockIdx.x) * TILE +
+        static_cast<int>(threadIdx.y);
+    const int destination_col = static_cast<int>(blockIdx.y) * TILE +
+        static_cast<int>(threadIdx.x);
+    if (destination_row < cols && destination_col < rows)
+        destination[destination_row * rows + destination_col] =
+            tile[threadIdx.x][threadIdx.y];
+}
+
 // ---------------------------------------------------------------------------
 //  gemm_tiled_kernel
 //
@@ -601,6 +629,20 @@ void matmul_cuda_tiled(const Tensor& A, const Tensor& B, Tensor& C)
             static_cast<float*>(C.raw_data()), M, N, K);
     }
     CUDA_CHECK_KERNEL();   // sync + error check
+}
+
+void transpose_fp32_to_bf16_cuda(const float* d_src, std::uint16_t* d_dst,
+                                 int rows, int cols)
+{
+    if (d_src == nullptr || d_dst == nullptr || rows <= 0 || cols <= 0)
+        throw std::invalid_argument(
+            "transpose_fp32_to_bf16_cuda: invalid pointers or dimensions");
+    const dim3 block(TILE, TILE);
+    const dim3 grid(
+        (static_cast<unsigned>(cols) + TILE - 1) / TILE,
+        (static_cast<unsigned>(rows) + TILE - 1) / TILE);
+    transpose_fp32_to_bf16_kernel<<<grid, block>>>(d_src, d_dst, rows, cols);
+    CUDA_CHECK_KERNEL();
 }
 
 void add_bias_cuda(Tensor& output, const Tensor& bias)

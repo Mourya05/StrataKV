@@ -1,10 +1,12 @@
 #include "stratakv/io/safetensors.h"
 #include <algorithm>
+#include <atomic>
 #include <climits>
 #include <cstdint>
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <chrono>
 #include <stdexcept>
 #include <string_view>
 #include <thread>
@@ -26,15 +28,17 @@
 
 namespace stratakv::io {
 namespace {
+constexpr std::size_t kParallelThreshold = 4u * 1024u * 1024u;
+
 template <typename Function>
 void parallel_for(std::size_t count, Function function) {
     const unsigned workers = std::thread::hardware_concurrency();
-    if (count < 16384 || workers < 2) {
+    if (count < kParallelThreshold || workers < 2) {
         function(0, count);
         return;
     }
     const std::size_t thread_count =
-        (std::min)(static_cast<std::size_t>(workers), count);
+        (std::min)(std::size_t{8}, static_cast<std::size_t>(workers));
     std::vector<std::thread> threads;
     threads.reserve(thread_count);
     const std::size_t chunk = (count + thread_count - 1) / thread_count;
@@ -138,7 +142,10 @@ float half_to_float(std::uint16_t value) noexcept {
 
     if (exponent == 0) {
         if (mantissa != 0) {
-            int unbiased_exponent = -1;
+            // Half subnormals start at 2^-14 before normalization. The
+            // previous -1 origin produced incorrect values for every
+            // subnormal payload.
+            int unbiased_exponent = -14;
             while ((mantissa & 0x0400u) == 0) {
                 mantissa <<= 1u;
                 --unbiased_exponent;
@@ -426,12 +433,23 @@ void validate_entries(std::vector<Entry>& entries, std::size_t payload_bytes) {
 }
 } // namespace
 
+static LoadBreakdown g_last_load_breakdown{};
+
+LoadBreakdown last_load_breakdown() noexcept {
+    return g_last_load_breakdown;
+}
+
 WeightMap load_safetensors(const std::filesystem::path& path,
                            bool require_mapped_f32) {
     static_assert(CHAR_BIT == 8 && sizeof(float) == 4 &&
                   std::numeric_limits<float>::is_iec559,
                   "Safetensors requires IEEE-754 binary32 and 8-bit bytes");
+    g_last_load_breakdown = {};
+    const auto mmap_start = std::chrono::steady_clock::now();
     auto mapped = map_file(path);
+    g_last_load_breakdown.mmap_open_ms =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - mmap_start).count();
     const std::uint64_t header64 = le64(mapped->data);
     constexpr std::uint64_t header_limit = 100u * 1024u * 1024u;
     if (header64 < 2 || header64 > header_limit || header64 > mapped->size - 8)
@@ -440,13 +458,21 @@ WeightMap load_safetensors(const std::filesystem::path& path,
     const std::size_t data_start = 8u + header_bytes;
     const std::string_view header(
         reinterpret_cast<const char*>(mapped->data + 8), header_bytes);
+    const auto header_start = std::chrono::steady_clock::now();
     auto entries = Parser(header).parse();
     validate_entries(entries, mapped->size - data_start);
+    g_last_load_breakdown.header_parse_ms =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - header_start).count();
 
     WeightMap result;
     result.reserve(entries.size());
+    const auto decode_start = std::chrono::steady_clock::now();
     for (const auto& e : entries) {
-        unsigned char* source = mapped->data + data_start + e.begin;
+        // Safetensors offsets are relative to the payload immediately after
+        // the eight-byte header length and JSON header.
+        const unsigned char* source =
+            mapped->data + data_start + e.begin;
         const bool is_f16 = e.dtype == "F16";
         const bool is_bf16 = e.dtype == "BF16" || e.dtype == "bfloat16";
         const bool keep_fp32 = is_norm_weight(e.name);
@@ -457,10 +483,11 @@ WeightMap load_safetensors(const std::filesystem::path& path,
             fail("F32 tensor is not directly mappable: " + e.name);
         if (alias) {
             result.emplace(e.name, Tensor::from_external(
-                e.shape, reinterpret_cast<float*>(source), mapped));
+                e.shape, const_cast<float*>(
+                    reinterpret_cast<const float*>(source)), mapped));
             continue;
         }
-        const DataType dtype = keep_fp32 ? DataType::FP32 : DataType::BF16;
+        const DataType dtype = DataType::FP32;
         Tensor converted(e.shape, dtype);
         parallel_for(e.count, [&](std::size_t begin, std::size_t end) {
             for (std::size_t i = begin; i < end; ++i) {
@@ -485,18 +512,86 @@ WeightMap load_safetensors(const std::filesystem::path& path,
                             ((bits & 0xff000000u) >> 24u);
                     std::memcpy(&value, &bits, sizeof(value));
                 }
-                if (keep_fp32) {
-                    converted[i] = value;
-                } else {
-                    std::uint32_t bits;
-                    std::memcpy(&bits, &value, sizeof(bits));
-                    static_cast<std::uint16_t*>(converted.raw_data())[i] =
-                        static_cast<std::uint16_t>(bits >> 16u);
-                }
+                converted[i] = value;
             }
         });
         result.emplace(e.name, std::move(converted));
     }
+    g_last_load_breakdown.tensor_decode_ms =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - decode_start).count();
     return result;
+}
+
+Tensor load_linear_bf16_transposed(const Tensor& source,
+                                   std::size_t out_features,
+                                   std::size_t in_features) {
+    if (source.ndim() != 2 ||
+        source.shape() != std::vector<std::size_t>{
+            out_features, in_features} ||
+        (source.dtype() != DataType::BF16 &&
+         source.dtype() != DataType::FP32)) {
+        throw std::invalid_argument(
+            "safetensors: expected a BF16 or FP32 [out, in] linear tensor");
+    }
+
+    Tensor destination({in_features, out_features}, DataType::BF16);
+    auto* dst = static_cast<std::uint16_t*>(destination.raw_data());
+    const auto* src_bf16 = source.dtype() == DataType::BF16
+        ? static_cast<const std::uint16_t*>(source.raw_data()) : nullptr;
+    const auto* src_fp32 = source.dtype() == DataType::FP32
+        ? static_cast<const float*>(source.raw_data()) : nullptr;
+    constexpr std::size_t tile_size = 32;
+    const std::size_t tile_rows =
+        (out_features + tile_size - 1) / tile_size;
+    const unsigned hardware_threads = std::thread::hardware_concurrency();
+    const std::size_t thread_count = hardware_threads > 1
+        ? (std::min)(static_cast<std::size_t>(hardware_threads), tile_rows)
+        : 1;
+    std::atomic<std::size_t> next_tile{0};
+    std::vector<std::thread> workers;
+    workers.reserve(thread_count);
+    for (std::size_t worker = 0; worker < thread_count; ++worker) {
+        workers.emplace_back([&] {
+            std::uint16_t tile_values[32][32];
+            for (;;) {
+                const std::size_t out_tile = next_tile.fetch_add(
+                    1, std::memory_order_relaxed);
+                if (out_tile >= tile_rows)
+                    break;
+                const std::size_t out_begin = out_tile * tile_size;
+                const std::size_t out_end =
+                    (std::min)(out_features, out_begin + tile_size);
+                for (std::size_t in_begin = 0; in_begin < in_features;
+                     in_begin += tile_size) {
+                    const std::size_t in_end =
+                        (std::min)(in_features, in_begin + tile_size);
+                    for (std::size_t out = out_begin; out < out_end; ++out) {
+                        for (std::size_t in = in_begin; in < in_end; ++in) {
+                            const std::size_t source_index =
+                                out * in_features + in;
+                            if (src_bf16 != nullptr) {
+                                tile_values[out - out_begin][in - in_begin] =
+                                    src_bf16[source_index];
+                            } else {
+                                std::uint32_t bits;
+                                std::memcpy(&bits, &src_fp32[source_index],
+                                            sizeof(bits));
+                                tile_values[out - out_begin][in - in_begin] =
+                                    static_cast<std::uint16_t>(bits >> 16u);
+                            }
+                        }
+                    }
+                    for (std::size_t out = out_begin; out < out_end; ++out)
+                        for (std::size_t in = in_begin; in < in_end; ++in)
+                            dst[in * out_features + out] =
+                                tile_values[out - out_begin][in - in_begin];
+                }
+            }
+        });
+    }
+    for (auto& worker : workers)
+        worker.join();
+    return destination;
 }
 } // namespace stratakv::io

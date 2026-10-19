@@ -4,6 +4,7 @@
 #include <cuda_runtime.h>
 #endif
 #include <algorithm>
+#include <atomic>
 #include <climits>
 #include <cmath>
 #include <cstdint>
@@ -21,18 +22,28 @@
 #include <thread>
 #include <utility>
 #include <cstdlib>
+#if defined(STRATAKV_HAS_CUDA)
+#include <cuda_runtime.h>
+#endif
 
 namespace stratakv::generation {
 namespace {
+constexpr std::size_t kParallelThreshold = 4u * 1024u * 1024u;
+
+bool parity_enabled() {
+    const char* value = std::getenv("STRATAKV_PARITY");
+    return value != nullptr && std::strcmp(value, "1") == 0;
+}
+
 template <typename Function>
 void parallel_for(std::size_t count, Function function) {
     const unsigned workers = std::thread::hardware_concurrency();
-    if (count < 16384 || workers < 2) {
+    if (count < kParallelThreshold || workers < 2) {
         function(0, count);
         return;
     }
     const std::size_t thread_count =
-        (std::min)(static_cast<std::size_t>(workers), count);
+        (std::min)(std::size_t{8}, static_cast<std::size_t>(workers));
     std::vector<std::thread> threads;
     threads.reserve(thread_count);
     const std::size_t chunk = (count + thread_count - 1) / thread_count;
@@ -257,47 +268,55 @@ Tensor take(io::WeightMap& weights, const std::string& key,
     if (source.shape() != std::vector<std::size_t>(expected) ||
         source.num_elements() != checked_elements(expected) || !source.raw_data())
         throw std::invalid_argument("Wrong shape/storage: " + key);
-    for (std::size_t i = 0; i < source.num_elements(); ++i)
-        if (!std::isfinite(source[i]))
-            throw std::invalid_argument("Non-finite weight: " + key);
+    std::atomic<bool> finite{true};
+    parallel_for(source.num_elements(), [&](std::size_t begin,
+                                            std::size_t end) {
+        for (std::size_t i = begin; i < end && finite.load(); ++i) {
+            if (!std::isfinite(source[i])) {
+                finite.store(false);
+                break;
+            }
+        }
+    });
+    if (!finite.load())
+        throw std::invalid_argument("Non-finite weight: " + key);
     Tensor result = std::move(it->second);
     weights.erase(it);
     return result;
 }
 
 void load_linear(io::WeightMap& weights, const std::string& key,
-                 layers::Linear& layer) {
+                 layers::Linear& layer, Tensor* gpu_staging = nullptr) {
     const auto in = layer.input_dim(), out = layer.output_dim();
     Tensor disk = take(weights, key, {out, in});
-    Tensor dest({in, out}, DataType::BF16);
-    if (dest.element_size() != sizeof(std::uint16_t))
-        throw std::runtime_error("Generator: Linear BF16 storage width mismatch");
-    auto* destination = static_cast<std::uint16_t*>(dest.raw_data());
-    if (disk.dtype() == DataType::BF16) {
-        const auto* source =
-            static_cast<const std::uint16_t*>(disk.raw_data());
-        parallel_for(dest.num_elements(), [&](std::size_t begin,
-                                               std::size_t end) {
-            for (std::size_t index = begin; index < end; ++index) {
-                const std::size_t i = index / out;
-                const std::size_t o = index % out;
-                destination[index] = source[o * in + i];
-            }
-        });
-    } else {
-        parallel_for(dest.num_elements(), [&](std::size_t begin,
-                                               std::size_t end) {
-            for (std::size_t index = begin; index < end; ++index) {
-                const std::size_t i = index / out;
-                const std::size_t o = index % out;
-                float value = disk[o * in + i];
-                std::uint32_t bits;
-                std::memcpy(&bits, &value, sizeof(bits));
-                destination[index] =
-                    static_cast<std::uint16_t>(bits >> 16u);
-            }
-        });
+#if defined(STRATAKV_HAS_CUDA)
+    if (gpu_staging != nullptr) {
+        if (disk.dtype() != DataType::FP32 ||
+            gpu_staging->dtype() != DataType::FP32 ||
+            gpu_staging->device() != Device::GPU ||
+            gpu_staging->num_elements() < disk.num_elements()) {
+            throw std::invalid_argument(
+                "Generator: invalid GPU linear staging buffer");
+        }
+        const auto status = cudaMemcpy(
+            gpu_staging->raw_data(), disk.raw_data(),
+            disk.num_elements() * sizeof(float), cudaMemcpyHostToDevice);
+        if (status != cudaSuccess)
+            throw std::runtime_error(
+                std::string("Generator: linear staging upload failed: ") +
+                cudaGetErrorString(status));
+        Tensor destination({in, out}, DataType::BF16, Device::GPU);
+        transpose_fp32_to_bf16_cuda(
+            static_cast<const float*>(gpu_staging->raw_data()),
+            static_cast<std::uint16_t*>(destination.raw_data()),
+            static_cast<int>(out), static_cast<int>(in));
+        layer.set_weight(std::move(destination));
+        if (Tensor* bias = layer.bias())
+            std::fill_n(bias->data(), bias->num_elements(), 0.0f);
+        return;
     }
+#endif
+    Tensor dest = io::load_linear_bf16_transposed(disk, out, in);
     layer.set_weight(std::move(dest));
     if (Tensor* bias = layer.bias())
         std::fill_n(bias->data(), bias->num_elements(), 0.0f);
@@ -355,7 +374,21 @@ Generator::Generator(GeneratorConfig config, io::WeightMap weights)
       embeddings_(take_embedding(weights, config_)),
       final_norm_(take_final_norm(weights, config_)),
       lm_head_(config_.hidden_dim, config_.vocab_size) {
+    const auto init_start = std::chrono::steady_clock::now();
     const auto h = config_.hidden_dim;
+#if defined(STRATAKV_HAS_CUDA)
+    std::optional<Tensor> gpu_staging;
+    {
+        const std::size_t largest_linear = (std::max)(
+            config_.vocab_size * h, config_.intermediate_dim * h);
+        gpu_staging.emplace(
+            std::vector<std::size_t>{largest_linear},
+            DataType::FP32, Device::GPU);
+    }
+    Tensor* staging = gpu_staging ? &*gpu_staging : nullptr;
+#else
+    Tensor* staging = nullptr;
+#endif
     const bool llama_schema = has_weight(
         weights, "model.layers.0.input_layernorm.weight");
 
@@ -372,20 +405,20 @@ Generator::Generator(GeneratorConfig config, io::WeightMap weights)
 
             auto& attn = block.attention();
             load_linear(weights, prefix + "self_attn.q_proj.weight",
-                        attn.query_projection());
+                        attn.query_projection(), staging);
             load_linear(weights, prefix + "self_attn.k_proj.weight",
-                        attn.key_projection());
+                        attn.key_projection(), staging);
             load_linear(weights, prefix + "self_attn.v_proj.weight",
-                        attn.value_projection());
+                        attn.value_projection(), staging);
             load_linear(weights, prefix + "self_attn.o_proj.weight",
-                        attn.output_projection());
+                        attn.output_projection(), staging);
 
             load_linear(weights, prefix + "mlp.gate_proj.weight",
-                        block.gate_projection());
+                        block.gate_projection(), staging);
             load_linear(weights, prefix + "mlp.up_proj.weight",
-                        block.up_projection());
+                        block.up_projection(), staging);
             load_linear(weights, prefix + "mlp.down_proj.weight",
-                        block.down_projection());
+                        block.down_projection(), staging);
         }
 
     } else {
@@ -403,30 +436,39 @@ Generator::Generator(GeneratorConfig config, io::WeightMap weights)
             take(weights, "block.post_attention_norm.weight", {h}));
         auto& attn = block.attention();
         load_linear(weights, "block.attn.q_proj.weight",
-                    attn.query_projection());
+                    attn.query_projection(), staging);
         load_linear(weights, "block.attn.k_proj.weight",
-                    attn.key_projection());
+                    attn.key_projection(), staging);
         load_linear(weights, "block.attn.v_proj.weight",
-                    attn.value_projection());
+                    attn.value_projection(), staging);
         load_linear(weights, "block.attn.o_proj.weight",
-                    attn.output_projection());
+                    attn.output_projection(), staging);
         load_linear(weights, "block.ffn.up_proj.weight",
-                    block.gate_projection());
+                    block.gate_projection(), staging);
         for (std::size_t i = 0;
              i < block.gate_projection().weight().num_elements(); ++i)
             block.up_projection().weight()[i] =
                 block.gate_projection().weight()[i];
         load_linear(weights, "block.ffn.down_proj.weight",
-                    block.down_projection());
+                    block.down_projection(), staging);
     }
-    load_linear(weights, "lm_head.weight", lm_head_);
+    load_linear(weights, "lm_head.weight", lm_head_, staging);
+#if defined(STRATAKV_HAS_CUDA)
+    if (gpu_staging) {
+        cudaDeviceSynchronize();
+        gpu_staging.reset();
+    }
+#endif
 
 #if defined(STRATAKV_HAS_CUDA)
     device_ = Device::GPU;
     if (embeddings_.dtype() != DataType::FP32) {
         Tensor embedding_fp32(embeddings_.shape(), DataType::FP32);
-        for (std::size_t i = 0; i < embeddings_.num_elements(); ++i)
-            embedding_fp32[i] = embeddings_[i];
+        parallel_for(embeddings_.num_elements(),
+                     [&](std::size_t begin, std::size_t end) {
+                         for (std::size_t i = begin; i < end; ++i)
+                             embedding_fp32[i] = embeddings_[i];
+                     });
         embeddings_ = std::move(embedding_fp32);
     }
     embeddings_ = embeddings_.to(Device::GPU);
@@ -434,7 +476,7 @@ Generator::Generator(GeneratorConfig config, io::WeightMap weights)
     lm_head_.to(Device::GPU);
     for (auto& block : blocks_)
         block.to(Device::GPU);
-    if (std::getenv("STRATAKV_PARITY") != nullptr) {
+    if (parity_enabled()) {
         blocks_.front().set_parity_diagnostic(true);
         parity_blocks_ = make_parity_blocks(config_, blocks_);
         parity_pools_ = make_pools(config_, Device::CPU);
@@ -458,6 +500,8 @@ Generator::Generator(GeneratorConfig config, io::WeightMap weights)
 #endif
     if (!weights.empty())
         throw std::invalid_argument("Unexpected weight: " + weights.begin()->first);
+    initialization_ms_ = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - init_start).count();
 }
 
 std::size_t Generator::free_block_count() const noexcept {
@@ -572,7 +616,7 @@ std::vector<int> Generator::generate(const std::vector<int>& prompt,
     for (std::size_t layer = 0; layer < blocks_.size(); ++layer)
         pages_[layer].allocate_sequence(0, pools_[layer]);
 #if defined(STRATAKV_HAS_CUDA)
-    if (std::getenv("STRATAKV_PARITY") != nullptr) {
+    if (parity_enabled()) {
         for (std::size_t layer = 0; layer < parity_pages_.size(); ++layer) {
             if (!parity_pages_[layer].has_sequence(0))
                 parity_pages_[layer].allocate_sequence(
@@ -583,7 +627,7 @@ std::vector<int> Generator::generate(const std::vector<int>& prompt,
     Tensor last({1, config_.hidden_dim}, DataType::FP32, device_);
     if (device_ == Device::GPU) {
 #if defined(STRATAKV_HAS_CUDA)
-        const bool parity = std::getenv("STRATAKV_PARITY") != nullptr;
+        const bool parity = parity_enabled();
         bool first_token = true;
         int prompt_position = 0;
         for (int token : prompt) {
@@ -666,7 +710,7 @@ std::vector<int> Generator::generate(const std::vector<int>& prompt,
             }
             next = sampler_.sample(*host_logits_);
 #if defined(STRATAKV_HAS_CUDA)
-            if (std::getenv("STRATAKV_PARITY") != nullptr &&
+            if (parity_enabled() &&
                 step == 0) {
                 if (!parity_last_cpu_)
                     throw std::runtime_error(

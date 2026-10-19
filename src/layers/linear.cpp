@@ -81,6 +81,9 @@ void Linear::set_weight(Tensor&& weight_transposed) {
 }
 
 void Linear::to(Device device) {
+    if (weight_.device() == device &&
+        (!bias_ || bias_->device() == device))
+        return;
     weight_ = weight_.to(device);
     if (bias_)
         *bias_ = bias_->to(device);

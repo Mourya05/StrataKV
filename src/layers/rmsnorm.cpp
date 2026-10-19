@@ -42,6 +42,8 @@ RMSNorm::RMSNorm(Tensor&& gamma, float epsilon)
 }
 
 void RMSNorm::to(Device device) {
+    if (gamma_.device() == device && gamma_.dtype() == DataType::FP32)
+        return;
     if (gamma_.dtype() == DataType::FP32) {
         gamma_ = gamma_.to(device);
         return;

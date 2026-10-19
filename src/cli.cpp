@@ -161,6 +161,13 @@ int main(int argc, char** argv) {
         const double pure_decode_tps =
             gen_ms > 0.0 ? static_cast<double>(generated_tokens) /
                 (gen_ms / 1000.0) : 0.0;
+        const auto load_breakdown = stratakv::io::last_load_breakdown();
+        std::cerr << "[LOAD_BREAKDOWN] mmap_open_ms = "
+                  << load_breakdown.mmap_open_ms
+                  << ", header_parse_ms = " << load_breakdown.header_parse_ms
+                  << ", tensor_decode_ms = " << load_breakdown.tensor_decode_ms
+                  << ", generator_init_ms = "
+                  << generator.initialization_ms() << '\n';
         std::cerr << "[TIMING] load_ms = " << load_ms
                   << ", gen_ms = " << gen_ms
                   << ", tokens = " << generated_tokens
